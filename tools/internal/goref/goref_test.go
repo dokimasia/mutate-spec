@@ -1478,6 +1478,29 @@ origin sbr-zero 0: return pair{a: 1} -> "return pair{}"
 			formsCompile(t, dir, r)
 		})
 
+		t.Run("names the variables of a zero return apart from every identifier of the target", func(t *testing.T) {
+			t.Parallel()
+			dir := fixture(t, map[string]string{"next.go": `package fixture
+
+var _mutateZero0, _mutate1Step = 1, 2
+
+func next(n int) int {
+	return n + _mutateZero0*_mutate1Step
+}
+`})
+			r := enumerate(t, dir, goref.Options{})
+			var forms []string
+			for _, m := range r.Expect.Mutants {
+				if m.Kind == spec.SBRZero {
+					forms = append(forms, r.Forms[m.Key].Text)
+				}
+			}
+			assert.Equal(t, forms, []string{
+				"(_mutate2Zero0 int) {\n\tif (0 == 0) {\nreturn _mutate2Zero0\n}\nreturn n + _mutateZero0*_mutate1Step",
+			}, "the variable's name starts with the first prefix that no identifier of the target starts with")
+			formsCompile(t, dir, r)
+		})
+
 		t.Run("marks the mutants outside the selection", func(t *testing.T) {
 			t.Parallel()
 			r := enumerate(t, fixture(t, map[string]string{"clamp.go": clamp}), goref.Options{Lines: []string{"clamp.go:7-9"}})

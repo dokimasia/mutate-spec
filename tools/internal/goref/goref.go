@@ -82,7 +82,7 @@ func Enumerate(dir string, cat spec.Catalogue, ov spec.Overlay, opts Options) (*
 	}
 	e := &enumerator{
 		pkg: pkg, cat: cat, ov: ov, families: callFamilies(ov), classes: classes(cat),
-		calls: map[*ast.CallExpr]string{}, operands: map[ast.Expr]bool{},
+		calls: map[*ast.CallExpr]string{}, operands: map[ast.Expr]bool{}, zeroVar: prefix(pkg) + zeroName,
 	}
 	e.results, e.unwritten = e.resultVariables(), e.unwrittenVariables()
 	for _, f := range pkg.files {
@@ -104,6 +104,7 @@ func (e *enumerator) generated(include bool) []spec.Generated {
 	g := &enumerator{
 		pkg: e.pkg, cat: e.cat, ov: e.ov, families: e.families, classes: e.classes,
 		calls: map[*ast.CallExpr]string{}, operands: map[ast.Expr]bool{}, results: e.results, unwritten: e.unwritten,
+		zeroVar: e.zeroVar,
 	}
 	out := []spec.Generated{}
 	for _, f := range e.pkg.files {
@@ -338,11 +339,13 @@ type enumerator struct {
 	// family. operands contains each operand, without its parentheses, of a
 	// connector that is a site. results maps each variable whose calls a
 	// result rule puts into a family to the family. unwritten contains each
-	// unwritten variable of sbr-zero's rule.
+	// unwritten variable of sbr-zero's rule. zeroVar starts the name of each
+	// variable that an sbr-zero form returns.
 	calls     map[*ast.CallExpr]string
 	operands  map[ast.Expr]bool
 	results   map[*types.Var]string
 	unwritten map[*types.Var]bool
+	zeroVar   string
 }
 
 func (e *enumerator) off(pos token.Pos) int { return e.pkg.fset.Position(pos).Offset }
@@ -816,10 +819,38 @@ const (
 	falseExpr = "(0 != 0)"
 )
 
-// zeroVar starts the name of each variable that an sbr-zero form returns,
-// followed by the result's index. The name starts with the engine's prefix
-// _mutate, which a fixture does not use.
-const zeroVar = "_mutateZero"
+// The name of each variable that an sbr-zero form returns is the target's
+// prefix, zeroName and the result's index, as _mutateZero0. The prefix is
+// the first of namePrefix, namePrefix followed by 1, by 2 and so on with
+// which no identifier of the target starts, so no declaration of the target
+// names the variable.
+const (
+	namePrefix = "_mutate"
+	zeroName   = "Zero"
+)
+
+// prefix returns the first of _mutate, _mutate1, _mutate2 and so on with
+// which no identifier of the package's files starts.
+func prefix(pkg *pkgInfo) string {
+	var used []string
+	for _, f := range pkg.files {
+		ast.Inspect(f.ast, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && strings.HasPrefix(id.Name, namePrefix) {
+				used = append(used, id.Name)
+			}
+			return true
+		})
+	}
+	for n := 0; ; n++ {
+		p := namePrefix
+		if n > 0 {
+			p += strconv.Itoa(n)
+		}
+		if !slices.ContainsFunc(used, func(name string) bool { return strings.HasPrefix(name, p) }) {
+			return p
+		}
+	}
+}
 
 // swapped returns the site's source with the operator at opPos replaced by
 // to. The form pads the new operator with spaces, so that it cannot merge
@@ -1121,12 +1152,13 @@ type edit struct {
 // return after the new one, where it never runs.
 //
 // The form returns variables that no declaration at the site hides, as a
-// local variable named false, nil or after a type hides that name. It names
-// the function's results where they have no names, renames a result named
-// _, and copies each other named result before the function's first
-// statement, while the result is still the zero value. Its range starts at
-// the first of these edits, and its replacement states the zero values as
-// zeroOf writes them.
+// local variable named false, nil or after a type hides that name. Their
+// names start with the target's prefix, so no declaration of the target
+// names them. The form gives the function's results names where they have
+// none, renames a result named _, and copies each other named result before
+// the function's first statement, while the result is still the zero value.
+// Its range starts at the first of these edits, and its replacement states
+// the zero values as zeroOf writes them.
 func (e *enumerator) zero(f *file, n *ast.ReturnStmt, fn *function, scope string) {
 	if fn == nil || fn.typ.Results == nil || len(n.Results) == 0 {
 		return
@@ -1138,7 +1170,7 @@ func (e *enumerator) zero(f *file, n *ast.ReturnStmt, fn *function, scope string
 	for _, field := range results.List {
 		zero, dest := e.zeroOf(f, field.Type), e.pkg.info.TypeOf(field.Type)
 		if len(field.Names) == 0 {
-			v := zeroVar + strconv.Itoa(len(vars))
+			v := e.zeroVar + strconv.Itoa(len(vars))
 			at := e.off(field.Type.Pos())
 			if results.Opening.IsValid() {
 				edits = append(edits, edit{at, at, v + " "})
@@ -1150,7 +1182,7 @@ func (e *enumerator) zero(f *file, n *ast.ReturnStmt, fn *function, scope string
 			continue
 		}
 		for _, name := range field.Names {
-			v := zeroVar + strconv.Itoa(len(vars))
+			v := e.zeroVar + strconv.Itoa(len(vars))
 			if name.Name == "_" {
 				edits = append(edits, edit{e.off(name.Pos()), e.off(name.End()), v})
 			} else {
