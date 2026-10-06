@@ -10,19 +10,41 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
 
+// The layout of a checkout of the definition: each file and directory as a
+// path from the checkout's root, with forward slashes. The overlay of a
+// language is its name with OverlaySuffix in OverlaysDir. A case's
+// directory in CorpusDir has CaseFile, and a directory per language whose
+// fixture has ExpectFile.
+const (
+	VersionFile   = "VERSION"
+	CatalogueFile = "spec/catalogue.json"
+	ProtocolFile  = "spec/protocol.json"
+	SchemaFile    = "spec/record.schema.json"
+	ManifestFile  = "spec/manifest.json"
+	OverlaysDir   = "spec/overlays"
+	OverlaySuffix = ".json"
+	CorpusDir     = "spec/corpus"
+	CaseFile      = "case.json"
+	ExpectFile    = "expect.json"
+)
+
 // Catalogue is spec/catalogue.json: the operator classes, their kinds, the
 // rule families, the key's prefix, the annotation that suppresses mutants,
-// and the directive that makes a generated file a target.
+// the keyword of an annotation that names every kind, and the directive
+// that makes a generated file a target.
 type Catalogue struct {
 	Key        string   `json:"key"`
 	Annotation string   `json:"annotation"`
+	Every      string   `json:"every"`
 	Include    string   `json:"include"`
 	Classes    []Class  `json:"classes"`
 	Kinds      []Kind   `json:"kinds"`
@@ -116,50 +138,57 @@ type SkipRule struct {
 	Where  string `json:"where"`
 }
 
-// Families lists, per rule family, the APIs whose calls are suppressed.
-// Methods lists the methods that belong to a family by their name and
-// signature on any type of one kind, because libraries declare them anew.
-// Results lists the result rules, which put the calls of a variable that
-// holds a result of a family's API into the family.
-type Families struct {
-	Logging  []string   `json:"logging"`
-	Timing   []string   `json:"timing"`
-	Flags    []string   `json:"flags"`
-	Capacity []Capacity `json:"capacity"`
-	Helper   []string   `json:"helper"`
-	Methods  []Method   `json:"methods"`
-	Results  []Result   `json:"results"`
+// Families maps each rule family of an overlay to the rules that put code
+// into it. Every family is a family of the catalogue.
+type Families map[string]Rules
+
+// Rules are the rules of one family in one language. A call of an API that
+// APIs lists, of a method that a method rule matches, or of a variable that
+// a result rule matches is in the family, with its arguments and the
+// statement that makes it. An argument that an argument rule names is in
+// the family alone.
+type Rules struct {
+	APIs      []string   `json:"apis,omitempty"`
+	Methods   []Method   `json:"methods,omitempty"`
+	Results   []Result   `json:"results,omitempty"`
+	Arguments []Argument `json:"arguments,omitempty"`
 }
 
-// Calls returns the call families, logging, timing, flags and helper, by
-// family.
-func (f Families) Calls() map[string][]string {
-	return map[string][]string{"logging": f.Logging, "timing": f.Timing, "flags": f.Flags, "helper": f.Helper}
-}
+// The receiver kinds of a method rule, and the allocated kinds of an
+// argument rule of make, as an overlay spells them.
+const (
+	// OnInterface is the receiver kind of a method rule that matches the
+	// method of an interface.
+	OnInterface = "interface"
+	// OfSlice and OfMap are the allocated kinds of an argument rule of make.
+	OfSlice = "slice"
+	OfMap   = "map"
+	// Make is the builtin whose argument rules name the allocated kind.
+	Make = "make"
+)
 
 // Method puts a call of the method Name with the signature Signature, on a
-// value of any type of the kind On, into Family. On is interface: the call
-// selects the method of an interface.
+// value of any type of the kind On, into its family. On is interface: the
+// call selects the method of an interface.
 type Method struct {
-	Family    string `json:"family"`
 	Name      string `json:"name"`
 	Signature string `json:"signature"`
 	On        string `json:"on"`
 }
 
-// Result puts a call of a variable into Family when the variable holds only
-// results of the type Type that calls of the family's APIs returned, as the
-// overlay's variables rules state. Type is written as go/types writes a
-// type, such as context.CancelFunc.
+// Result puts a call of a variable into its family when every value that
+// the variable receives is a result of the type Type of a call of the
+// family's APIs, as the overlay's variables rules state. Type is written as
+// go/types writes a type, such as context.CancelFunc.
 type Result struct {
-	Family string `json:"family"`
-	Type   string `json:"type"`
+	Type string `json:"type"`
 }
 
-// Capacity is one argument that only sizes an allocation. Func is a
-// function's full name, or the builtin make, whose Of names the allocated
-// kind: slice or map. Argument is the argument's 0-based index.
-type Capacity struct {
+// Argument puts one argument of a call into its family, such as an argument
+// that only sizes an allocation. Func is a function's full name, or the
+// builtin make, whose Of names the allocated kind: slice or map. Argument
+// is the argument's 0-based index.
+type Argument struct {
 	Func     string `json:"func"`
 	Of       string `json:"of,omitempty"`
 	Argument int    `json:"argument"`
@@ -167,15 +196,19 @@ type Capacity struct {
 
 // Case is spec/corpus/<case>/case.json: what every language's fixture of
 // the case must produce, stated once. Confirm is true for a case whose run
-// confirms each survivor, and each mutant whose site never executed, in the
-// mutant's ordinary build.
+// confirms its survivors and its mutants without coverage in each mutant's
+// ordinary build. IncludeGenerated is true for a case whose run includes
+// the generated files. Sample is the number of mutant runs that a case's
+// run allows, or 0 for every run.
 type Case struct {
-	Case    string       `json:"case"`
-	Confirm bool         `json:"confirm,omitempty"`
-	Proves  string       `json:"proves"`
-	Fixture string       `json:"fixture"`
-	Mutants []CaseMutant `json:"mutants"`
-	Errors  []string     `json:"errors"`
+	Case             string       `json:"case"`
+	Confirm          bool         `json:"confirm,omitempty"`
+	IncludeGenerated bool         `json:"includeGenerated,omitempty"`
+	Sample           int          `json:"sample,omitempty"`
+	Proves           string       `json:"proves"`
+	Fixture          string       `json:"fixture"`
+	Mutants          []CaseMutant `json:"mutants"`
+	Errors           []string     `json:"errors"`
 }
 
 // CaseMutant identifies a mutant in every language by its scope, its kind
@@ -226,11 +259,13 @@ type Expect struct {
 	Errors    []string       `json:"errors"`
 }
 
-// Generated is a generated file of the target that the run leaves out, and
-// the number of mutants that the catalogue's kinds make at its sites.
+// Generated is a generated file of the target without the include
+// directive, the number of mutants that the catalogue's kinds make at its
+// sites, and whether the run included it.
 type Generated struct {
-	File    string `json:"file"`
-	Mutants int    `json:"mutants"`
+	File     string `json:"file"`
+	Mutants  int    `json:"mutants"`
+	Included bool   `json:"included"`
 }
 
 // ExpectMutant is one mutant as one language's record states it. Tests,
@@ -307,38 +342,48 @@ func Load(root string) (*Spec, error) {
 // schema and the overlays under root, and not the corpus.
 func LoadDefinition(root string) (*Spec, error) {
 	s := &Spec{Root: root, Overlays: map[string]Overlay{}, Cases: map[string]Case{}, Expects: map[string]map[string]Expect{}}
-	version, err := os.ReadFile(filepath.Join(root, "VERSION"))
+	version, err := os.ReadFile(s.Path(VersionFile))
 	if err != nil {
 		return nil, err
 	}
 	s.Version = strings.TrimSpace(string(version))
-	if err := decode(filepath.Join(root, "spec", "catalogue.json"), &s.Catalogue); err != nil {
+	if err := decode(s.Path(CatalogueFile), &s.Catalogue); err != nil {
 		return nil, err
 	}
-	if err := decode(filepath.Join(root, "spec", "protocol.json"), &s.Protocol); err != nil {
+	if err := decode(s.Path(ProtocolFile), &s.Protocol); err != nil {
 		return nil, err
 	}
-	if err := decode(filepath.Join(root, "spec", "record.schema.json"), &s.Schema); err != nil {
+	if err := decode(s.Path(SchemaFile), &s.Schema); err != nil {
 		return nil, err
 	}
-	overlays, err := filepath.Glob(filepath.Join(root, "spec", "overlays", "*.json"))
+	overlays, err := os.ReadDir(s.Path(OverlaysDir))
 	if err != nil {
 		return nil, err
 	}
-	for _, path := range overlays {
+	for _, entry := range overlays {
+		language, isJSON := strings.CutSuffix(entry.Name(), OverlaySuffix)
+		if entry.IsDir() || !isJSON {
+			continue
+		}
 		var o Overlay
-		if err := decode(path, &o); err != nil {
+		if err := decode(filepath.Join(s.Path(OverlaysDir), entry.Name()), &o); err != nil {
 			return nil, err
 		}
-		s.Overlays[strings.TrimSuffix(filepath.Base(path), ".json")] = o
+		s.Overlays[language] = o
 	}
 	return s, nil
+}
+
+// Path returns the path of a file or directory of the layout, such as
+// CatalogueFile, in the checkout.
+func (s *Spec) Path(name string) string {
+	return filepath.Join(s.Root, name)
 }
 
 // loadCorpus reads every case under spec/corpus and the expectations of
 // each language's fixture.
 func (s *Spec) loadCorpus() error {
-	cases, err := os.ReadDir(filepath.Join(s.Root, "spec", "corpus"))
+	cases, err := os.ReadDir(s.Path(CorpusDir))
 	if err != nil {
 		return err
 	}
@@ -346,9 +391,9 @@ func (s *Spec) loadCorpus() error {
 		if !entry.IsDir() {
 			continue
 		}
-		dir := filepath.Join(s.Root, "spec", "corpus", entry.Name())
+		dir := filepath.Join(s.Path(CorpusDir), entry.Name())
 		var c Case
-		if err := decode(filepath.Join(dir, "case.json"), &c); err != nil {
+		if err := decode(filepath.Join(dir, CaseFile), &c); err != nil {
 			return err
 		}
 		s.Cases[entry.Name()] = c
@@ -361,7 +406,7 @@ func (s *Spec) loadCorpus() error {
 				continue
 			}
 			var e Expect
-			if err := decode(filepath.Join(dir, l.Name(), "expect.json"), &e); err != nil {
+			if err := decode(filepath.Join(dir, l.Name(), ExpectFile), &e); err != nil {
 				return err
 			}
 			if s.Expects[entry.Name()] == nil {
@@ -375,7 +420,7 @@ func (s *Spec) loadCorpus() error {
 
 // Fixture returns the directory of a case's fixture in a language.
 func (s *Spec) Fixture(name, language string) string {
-	return filepath.Join(s.Root, "spec", "corpus", name, language)
+	return filepath.Join(s.Path(CorpusDir), name, language)
 }
 
 func decode(path string, v any) error {
@@ -396,6 +441,61 @@ func decode(path string, v any) error {
 
 // ErrProblems reports that a check found problems.
 var ErrProblems = errors.New("the definition breaks its rules")
+
+// The verdicts whose meaning the corpus's rules read, as the protocol spells
+// them.
+const (
+	Killed      = "killed"
+	TimedOut    = "timed-out"
+	Exhausted   = "exhausted"
+	Survived    = "survived"
+	NoCoverage  = "no-coverage"
+	NotViable   = "not-viable"
+	Suppressed  = "suppressed"
+	NotSelected = "not-selected"
+	NotRun      = "not-run"
+	Error       = "error"
+)
+
+// The places of a verdict in the score, as the protocol spells them.
+const (
+	Detected   = "detected"
+	Undetected = "undetected"
+	Excluded   = "excluded"
+)
+
+// The kinds of the catalogue, as it spells them.
+const (
+	AOR         = "aor"
+	RORBoundary = "ror-boundary"
+	RORTrue     = "ror-true"
+	RORFalse    = "ror-false"
+	LCRLeft     = "lcr-left"
+	LCRRight    = "lcr-right"
+	LCRTrue     = "lcr-true"
+	LCRFalse    = "lcr-false"
+	UOIIncDec   = "uoi-incdec"
+	UOINot      = "uoi-not"
+	UOIMinus    = "uoi-minus"
+	SBRDelete   = "sbr-delete"
+	SBRZero     = "sbr-zero"
+)
+
+// The reasons of the Go overlay's skips, as it spells them.
+const (
+	SkipConstant      = "constant expression"
+	SkipTypeParameter = "operand of type-parameter type"
+	SkipContextShift  = "untyped constant in a non-constant shift"
+	SkipNamedBool     = "named boolean result"
+	SkipSideEffects   = "assignment target with side effects"
+	SkipCgo           = "file imports C"
+)
+
+// The run errors that an enumeration finds, as the protocol spells them.
+const (
+	ErrorWithoutReason = "annotation-without-reason"
+	ErrorStale         = "stale-annotation"
+)
 
 // Check returns every problem the definition has, sorted. An empty result
 // means that every file meets every rule.
@@ -449,6 +549,9 @@ func (s *Spec) checkCatalogue(p *problems) {
 	if c.Include == "" || c.Include == c.Annotation {
 		p.add("catalogue: include is empty or the annotation's name")
 	}
+	if c.Every == "" {
+		p.add("catalogue: every is empty")
+	}
 	classes := map[string]Class{}
 	for _, class := range c.Classes {
 		if _, dup := classes[class.ID]; dup {
@@ -476,6 +579,9 @@ func (s *Spec) checkCatalogue(p *problems) {
 			p.add("catalogue: class %q lists kinds %v, and the kinds that name it are %v", class.ID, class.Kinds, members[class.ID])
 		}
 	}
+	if _, isClass := classes[c.Every]; isClass || seen[c.Every] {
+		p.add("catalogue: every is %q, the name of a kind or a class", c.Every)
+	}
 	families := map[string]bool{}
 	for _, family := range c.Families {
 		if families[family.ID] {
@@ -500,7 +606,7 @@ func (s *Spec) checkProtocol(p *problems) {
 		}
 		seen[v.ID] = true
 		switch v.Score {
-		case "detected", "undetected", "excluded":
+		case Detected, Undetected, Excluded:
 		default:
 			p.add("protocol: verdict %q counts as %q, which is not detected, undetected or excluded", v.ID, v.Score)
 		}
@@ -586,47 +692,79 @@ func (s *Spec) checkOverlays(p *problems) {
 		skips := map[string]bool{}
 		for _, rule := range o.Skips {
 			if rule.Reason == "" || rule.Where == "" || skips[rule.Reason] {
-				p.add("overlay %s: skip reason %q is empty, listed twice, or does not say where it applies", name, rule.Reason)
+				p.add("overlay %s: skip reason %q is empty, listed twice, or does not state where it applies", name, rule.Reason)
 			}
 			skips[rule.Reason] = true
 		}
-		for family, calls := range o.Families.Calls() {
-			seen := map[string]bool{}
-			for _, call := range calls {
-				if call == "" || seen[call] {
-					p.add("overlay %s: %s lists %q twice or empty", name, family, call)
-				}
-				seen[call] = true
-			}
-		}
-		for _, c := range o.Families.Capacity {
-			if c.Func == "" || c.Argument < 0 {
-				p.add("overlay %s: a capacity entry needs a function and an argument index", name)
-			}
-			if c.Func == "make" && c.Of != "slice" && c.Of != "map" {
-				p.add("overlay %s: capacity entry for make names %q, not slice or map", name, c.Of)
-			}
-		}
-		families := s.families()
-		for _, m := range o.Families.Methods {
-			if !families[m.Family] || m.Name == "" || m.Signature == "" || m.On != "interface" {
-				p.add("overlay %s: method %q needs a family of the catalogue, a name, a signature and on: interface", name, m.Name)
-			}
-		}
-		calls := o.Families.Calls()
-		rules := map[Result]bool{}
-		for _, r := range o.Families.Results {
-			if _, lists := calls[r.Family]; !lists || !families[r.Family] || !strings.Contains(r.Type, ".") || rules[r] {
-				p.add("overlay %s: result rule %q of %q needs a family of the catalogue that lists calls, a type of a package, and no twin", name, r.Type, r.Family)
-			}
-			rules[r] = true
-		}
-		if len(o.Families.Results) > 0 && len(o.Variables) == 0 {
-			p.add("overlay %s: states result rules and no variables rule", name)
-		}
+		s.checkFamilies(p, name, o)
 		if !semver.MatchString(o.Version) {
 			p.add("overlay %s: version %q is not major.minor.patch", name, o.Version)
 		}
+	}
+}
+
+// checkFamilies checks the rules of each family of the overlay o, named
+// name: every family is a family of the catalogue and states a rule, no API
+// is listed twice, in one family or in two, every method rule matches a
+// method of an interface by its name and its signature, every result rule
+// names a type of a package once in a family that lists APIs, and every
+// argument rule names a function and an argument, and the allocated kind of
+// make.
+func (s *Spec) checkFamilies(p *problems, name string, o Overlay) {
+	families := s.families()
+	owner := map[string]string{}
+	methods := map[Method]string{}
+	arguments := map[Argument]string{}
+	results := false
+	for _, family := range slices.Sorted(maps.Keys(o.Families)) {
+		rules := o.Families[family]
+		if !families[family] {
+			p.add("overlay %s: family %q is not in the catalogue", name, family)
+		}
+		if len(rules.APIs)+len(rules.Methods)+len(rules.Results)+len(rules.Arguments) == 0 {
+			p.add("overlay %s: family %q states no rule", name, family)
+		}
+		for _, api := range rules.APIs {
+			switch other, listed := owner[api]; {
+			case api == "":
+				p.add("overlay %s: %s lists an empty API", name, family)
+			case listed:
+				p.add("overlay %s: %s lists %q, which %s lists too", name, family, api, other)
+			}
+			owner[api] = family
+		}
+		for _, m := range rules.Methods {
+			if m.Name == "" || m.Signature == "" || m.On != OnInterface {
+				p.add("overlay %s: method rule %q of %s needs a name, a signature and on: %s", name, m.Name, family, OnInterface)
+			}
+			if other, listed := methods[m]; listed {
+				p.add("overlay %s: %s states the method rule %q, which %s states too", name, family, m.Name, other)
+			}
+			methods[m] = family
+		}
+		named := map[string]bool{}
+		for _, r := range rules.Results {
+			if len(rules.APIs) == 0 || !strings.Contains(r.Type, ".") || named[r.Type] {
+				p.add("overlay %s: result rule %q of %s needs a family that lists APIs, a type of a package, and no twin", name, r.Type, family)
+			}
+			named[r.Type] = true
+			results = true
+		}
+		for _, a := range rules.Arguments {
+			if a.Func == "" || a.Argument < 0 {
+				p.add("overlay %s: an argument rule of %s needs a function and an argument index", name, family)
+			}
+			if a.Func == Make && a.Of != OfSlice && a.Of != OfMap {
+				p.add("overlay %s: the argument rule of %s for make names %q, not %s or %s", name, family, a.Of, OfSlice, OfMap)
+			}
+			if other, listed := arguments[a]; listed {
+				p.add("overlay %s: %s states the argument rule of %q, which %s states too", name, family, a.Func, other)
+			}
+			arguments[a] = family
+		}
+	}
+	if results && len(o.Variables) == 0 {
+		p.add("overlay %s: states result rules and no variables rule", name)
 	}
 }
 
@@ -678,11 +816,11 @@ func (s *Spec) checkCases(p *problems) {
 			if m.Confirmed && !c.Confirm {
 				p.add("case %s: %s is confirmed in a case that does not confirm", name, m.ID())
 			}
-			if c.Confirm && (m.Verdict == "survived" || m.Verdict == "no-coverage") && !m.Confirmed {
+			if c.Confirm && (m.Verdict == Survived || m.Verdict == NoCoverage) && !m.Confirmed {
 				p.add("case %s: %s has the verdict %s in a case that confirms, and is not confirmed", name, m.ID(), m.Verdict)
 			}
 			switch m.Verdict {
-			case "killed", "timed-out", "exhausted", "survived", "no-coverage", "not-viable", "error":
+			case Killed, TimedOut, Exhausted, Survived, NoCoverage, NotViable, Error:
 			default:
 				if m.Confirmed {
 					p.add("case %s: %s is confirmed with the verdict %s, which no run of a build gives", name, m.ID(), m.Verdict)
@@ -694,6 +832,9 @@ func (s *Spec) checkCases(p *problems) {
 			if !runErrors[e] {
 				p.add("case %s: error %q is not a run error the protocol defines", name, e)
 			}
+		}
+		if c.Sample < 0 {
+			p.add("case %s: sample %d is negative", name, c.Sample)
 		}
 		if len(s.Expects[name]) == 0 {
 			p.add("case %s: has no fixture in any language", name)
@@ -733,11 +874,16 @@ func (s *Spec) checkExpect(p *problems, name, language string, c Case, ids map[s
 		}
 	}
 	generated := map[string]bool{}
+	leftOut := map[string]bool{}
 	for _, g := range e.Generated {
 		if g.File == "" || strings.HasPrefix(g.File, "/") || g.Mutants < 0 || generated[g.File] {
 			p.add("%s: generated file %q is empty, absolute, listed twice, or has a negative count", where, g.File)
 		}
+		if g.Included != c.IncludeGenerated {
+			p.add("%s: generated file %q is included in one of case.json and expect.json and not in the other", where, g.File)
+		}
 		generated[g.File] = true
+		leftOut[g.File] = !g.Included
 	}
 	seen := map[string]bool{}
 	keys := map[string]string{}
@@ -758,7 +904,7 @@ func (s *Spec) checkExpect(p *problems, name, language string, c Case, ids map[s
 		if m.File == "" || strings.HasPrefix(m.File, "/") || m.End.Before(m.Start) || m.Start.Line < 1 || m.Start.Column < 1 {
 			p.add("%s: %s has a file or position out of shape", where, m.ID())
 		}
-		if generated[m.File] {
+		if leftOut[m.File] {
 			p.add("%s: %s is in %s, a generated file that the run leaves out", where, m.ID(), m.File)
 		}
 		if n := len([]rune(m.Original)); n == 0 || n > 120 || len([]rune(m.Replacement)) > 120 {
@@ -772,20 +918,20 @@ func (s *Spec) checkExpect(p *problems, name, language string, c Case, ids map[s
 		// otherwise a mutant that the toolchain rejects is not-viable.
 		selected := Selected(e.Lines, m.File, m.Start.Line)
 		suppressed := m.Rule != "" || m.Reason != ""
-		if !selected != (want.Verdict == "not-selected") {
+		if !selected != (want.Verdict == NotSelected) {
 			p.add("%s: %s is outside the selection in one of case.json and expect.json and not in the other", where, m.ID())
 		}
 		if !selected && (suppressed || m.NotViable) {
 			p.add("%s: %s is outside the selection and states a rule, a reason or not-viable", where, m.ID())
 		}
-		if selected && suppressed != (want.Verdict == "suppressed") {
+		if selected && suppressed != (want.Verdict == Suppressed) {
 			p.add("%s: %s is suppressed in one of case.json and expect.json and not in the other", where, m.ID())
 		}
-		if selected && !suppressed && m.NotViable != (want.Verdict == "not-viable") {
+		if selected && !suppressed && m.NotViable != (want.Verdict == NotViable) {
 			p.add("%s: %s is not viable in one of case.json and expect.json and not in the other", where, m.ID())
 		}
 		switch want.Verdict {
-		case "killed", "timed-out", "exhausted":
+		case Killed, TimedOut, Exhausted:
 		default:
 			if len(m.Tests) > 0 {
 				p.add("%s: %s names tests, and its verdict %s names none", where, m.ID(), want.Verdict)
@@ -794,7 +940,7 @@ func (s *Spec) checkExpect(p *problems, name, language string, c Case, ids map[s
 		// Only a mutant whose site the instrumented program executed has
 		// tests that executed it.
 		switch want.Verdict {
-		case "killed", "timed-out", "exhausted", "survived":
+		case Killed, TimedOut, Exhausted, Survived:
 		default:
 			if len(m.CoveredBy) > 0 {
 				p.add("%s: %s names covering tests, and its verdict %s has none", where, m.ID(), want.Verdict)
@@ -805,6 +951,41 @@ func (s *Spec) checkExpect(p *problems, name, language string, c Case, ids map[s
 		if !seen[id] && m.In(language, o) {
 			p.add("%s: %s is in case.json and not in expect.json", where, id)
 		}
+	}
+	if c.Sample > 0 {
+		checkSample(p, where, c, ids, e.Mutants)
+	}
+}
+
+// checkSample checks the verdicts of a case whose run allows c.Sample
+// mutant runs: the run starts the runs of the mutants in the order of their
+// keys, so the first c.Sample mutants that run in key order have a verdict
+// of a run, and every later one that would run is not-run. A mutant that is
+// not selected, suppressed or not viable does not run, and neither does one
+// whose site never executed, unless the case confirms.
+func checkSample(p *problems, where string, c Case, ids map[string]CaseMutant, mutants []ExpectMutant) {
+	byKey := slices.Clone(mutants)
+	slices.SortFunc(byKey, func(a, b ExpectMutant) int { return strings.Compare(a.Key, b.Key) })
+	started := 0
+	for _, m := range byKey {
+		verdict := ids[m.ID()].Verdict
+		switch verdict {
+		case NotSelected, Suppressed, NotViable:
+			continue
+		case NoCoverage:
+			if !c.Confirm {
+				continue
+			}
+		}
+		inside := started < c.Sample
+		if inside == (verdict == NotRun) {
+			want := "the verdict of a run"
+			if !inside {
+				want = NotRun
+			}
+			p.add("%s: %s is %s, and the sample of %d runs in key order gives it %s", where, m.ID(), verdict, c.Sample, want)
+		}
+		started++
 	}
 }
 

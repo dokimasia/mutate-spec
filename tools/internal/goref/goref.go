@@ -11,6 +11,7 @@
 package goref
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -22,14 +23,20 @@ import (
 	"go/scanner"
 	"go/token"
 	"go/types"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
 	"mutate-spec/tools/internal/spec"
 )
+
+// Language is the language that goref enumerates: the name of its overlay,
+// and of the directory of a case's fixture in it.
+const Language = "go"
 
 // Form is the source that applies one mutant alone: Text replaces the
 // bytes from Start to End of File. A form evaluates the site's operands as
@@ -54,9 +61,18 @@ type Result struct {
 	Static map[string]string
 }
 
+// Options are the settings of one enumeration that a case states: Lines is
+// the run's selection, as file:first-last entries, and IncludeGenerated
+// makes every generated file a target.
+type Options struct {
+	Lines            []string
+	IncludeGenerated bool
+}
+
 // Enumerate reads the Go package in dir and returns its mutants under the
-// catalogue and the Go overlay, with lines as the run's selection.
-func Enumerate(dir string, cat spec.Catalogue, ov spec.Overlay, lines []string) (*Result, error) {
+// catalogue and the Go overlay, with the selection and the generated files
+// that opts states.
+func Enumerate(dir string, cat spec.Catalogue, ov spec.Overlay, opts Options) (*Result, error) {
 	pkg, err := load(dir, ov.Comment+cat.Include)
 	if err != nil {
 		return nil, err
@@ -67,20 +83,21 @@ func Enumerate(dir string, cat spec.Catalogue, ov spec.Overlay, lines []string) 
 	}
 	e.results = e.resultVariables()
 	for _, f := range pkg.files {
-		if !f.generated {
+		if !f.generated || opts.IncludeGenerated {
 			e.file(f)
 		}
 	}
-	r := e.result(lines)
-	r.Expect.Generated = e.generated()
+	r := e.result(opts.Lines)
+	r.Expect.Generated = e.generated(opts.IncludeGenerated)
 	return r, nil
 }
 
 // generated returns each generated file of the package in file order, with
-// the number of mutants that the kinds make at its sites. A second
-// enumerator walks the files, so the result contains none of their sites,
-// annotations and suppressions.
-func (e *enumerator) generated() []spec.Generated {
+// the number of mutants that the kinds make at its sites, and whether the
+// run includes it. The mutants of an included file are the enumeration's
+// own. A second enumerator walks a file that the run leaves out, so the
+// result contains none of its sites, annotations and suppressions.
+func (e *enumerator) generated(include bool) []spec.Generated {
 	g := &enumerator{
 		pkg: e.pkg, cat: e.cat, ov: e.ov, families: e.families, classes: e.classes,
 		calls: map[*ast.CallExpr]string{}, operands: map[ast.Expr]bool{}, results: e.results,
@@ -90,13 +107,19 @@ func (e *enumerator) generated() []spec.Generated {
 		if !f.generated {
 			continue
 		}
-		before := len(g.sites)
-		g.file(f)
-		mutants := 0
-		for _, s := range g.sites[before:] {
-			mutants += len(s.mutants)
+		sites := e.sites
+		if !include {
+			before := len(g.sites)
+			g.file(f)
+			sites = g.sites[before:]
 		}
-		out = append(out, spec.Generated{File: f.name, Mutants: mutants})
+		mutants := 0
+		for _, s := range sites {
+			if s.f == f {
+				mutants += len(s.mutants)
+			}
+		}
+		out = append(out, spec.Generated{File: f.name, Mutants: mutants, Included: include})
 	}
 	return out
 }
@@ -116,10 +139,30 @@ type pkgInfo struct {
 	types *types.Package
 }
 
+// The names that load reads in a fixture's directory.
+const (
+	// goSuffix and testSuffix end the names of Go files and of test files.
+	goSuffix   = ".go"
+	testSuffix = "_test.go"
+	// cgoImport is the import path of cgo, as an import spec quotes it.
+	cgoImport = `"C"`
+	// compiler names the toolchain whose export data the importer reads.
+	compiler = "gc"
+	// fixturePath is the import path of the package that load type-checks.
+	fixturePath = "fixture"
+	// goMod is the module file whose go line sets the language version.
+	goMod = "go.mod"
+	// goLine starts the go line of a module file, and languagePrefix a
+	// language version as go/types spells it, such as go1.21.
+	goLine         = "go "
+	languagePrefix = "go"
+)
+
 // load parses and type-checks the files that the build compiles, without
 // test files and without the files that build constraints exclude. A file
 // is generated when go/ast.IsGenerated reports it and its header does not
-// contain the line include.
+// contain the line include. load reads each file once, and the build's
+// constraints read the same bytes.
 func load(dir, include string) (*pkgInfo, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -129,26 +172,28 @@ func load(dir, include string) (*pkgInfo, error) {
 	var syntax []*ast.File
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		ok, err := build.Default.MatchFile(dir, name)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
+		if entry.IsDir() || !strings.HasSuffix(name, goSuffix) || strings.HasSuffix(name, testSuffix) {
 			continue
 		}
 		src, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			return nil, err
 		}
+		ctxt := build.Default
+		ctxt.OpenFile = func(string) (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(src)), nil }
+		ok, err := ctxt.MatchFile(dir, name)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
 		af, err := parser.ParseFile(p.fset, name, src, parser.ParseComments|parser.SkipObjectResolution)
 		if err != nil {
 			return nil, err
 		}
 		for _, imp := range af.Imports {
-			if imp.Path.Value == `"C"` {
+			if imp.Path.Value == cgoImport {
 				return nil, fmt.Errorf("%s: imports C, and the reference enumerator reads no cgo file", name)
 			}
 		}
@@ -160,8 +205,8 @@ func load(dir, include string) (*pkgInfo, error) {
 		return nil, fmt.Errorf("%s: no Go file that the build compiles", dir)
 	}
 	p.info = &types.Info{Types: map[ast.Expr]types.TypeAndValue{}, Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}}
-	conf := types.Config{Importer: importer.ForCompiler(p.fset, "gc", nil), GoVersion: goVersion(dir)}
-	if p.types, err = conf.Check("fixture", p.fset, syntax, p.info); err != nil {
+	conf := types.Config{Importer: importer.ForCompiler(p.fset, compiler, nil), GoVersion: goVersion(dir)}
+	if p.types, err = conf.Check(fixturePath, p.fset, syntax, p.info); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -186,13 +231,13 @@ func includes(f *ast.File, directive string) bool {
 // goVersion returns the go line of dir's go.mod as go/types spells a
 // language version, or "" when there is none.
 func goVersion(dir string) string {
-	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	data, err := os.ReadFile(filepath.Join(dir, goMod))
 	if err != nil {
 		return ""
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "go "); ok {
-			return "go" + strings.TrimSpace(v)
+	for line := range strings.Lines(string(data)) {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), goLine); ok {
+			return languagePrefix + strings.TrimSpace(v)
 		}
 	}
 	return ""
@@ -207,11 +252,11 @@ func classes(cat spec.Catalogue) map[string]string {
 	return m
 }
 
-// callFamilies maps each API of a call family to the family.
+// callFamilies maps each API that a family lists to the family.
 func callFamilies(ov spec.Overlay) map[string]string {
 	m := map[string]string{}
-	for family, names := range ov.Families.Calls() {
-		for _, name := range names {
+	for family, rules := range ov.Families {
+		for _, name := range rules.APIs {
 			m[name] = family
 		}
 	}
@@ -497,23 +542,25 @@ func (e *enumerator) effectFree(n ast.Node) bool {
 // pure reports whether call is a conversion, a call of a builtin without an
 // effect, or a call that a family which lists calls suppresses.
 func (e *enumerator) pure(call *ast.CallExpr) bool {
-	info := e.pkg.info
-	if e.calls[call] != "" || info.Types[call.Fun].IsType() {
+	if e.calls[call] != "" || e.pkg.info.Types[call.Fun].IsType() {
 		return true
 	}
-	id, ok := ast.Unparen(call.Fun).(*ast.Ident)
-	if !ok {
-		return false
-	}
-	if _, builtin := info.Uses[id].(*types.Builtin); !builtin {
-		return false
-	}
-	switch id.Name {
-	case "len", "cap", "min", "max", "real", "imag", "complex":
-		return true
-	}
-	return false
+	b, ok := e.callee(call).(*types.Builtin)
+	return ok && effectFreeBuiltins[b.Name()]
 }
+
+// effectFreeBuiltins lists the builtins whose calls the overlay's compound
+// rule counts as calls without an effect.
+var effectFreeBuiltins = map[string]bool{
+	"len": true, "cap": true, "min": true, "max": true, "real": true, "imag": true, "complex": true,
+}
+
+// The builtins whose calls the zero-value and the terminating-statement
+// rules read.
+const (
+	builtinNew   = "new"
+	builtinPanic = "panic"
+)
 
 // initFree reports whether an init statement has no effect: it is absent,
 // or a short variable declaration whose values have none.
@@ -584,9 +631,11 @@ func (e *enumerator) firstFamily(st ast.Stmt) string {
 }
 
 // scopeOf names a function F as F, and a method M of T or *T as T.M, with
-// the receiver's type in parentheses or not.
+// the receiver's type in parentheses or not. The package type-checks, so a
+// method's receiver names a type that the package declares, possibly with
+// type parameters.
 func scopeOf(d *ast.FuncDecl) string {
-	if d.Recv == nil || len(d.Recv.List) == 0 {
+	if d.Recv == nil {
 		return d.Name.Name
 	}
 	t := ast.Unparen(d.Recv.List[0].Type)
@@ -599,10 +648,7 @@ func scopeOf(d *ast.FuncDecl) string {
 	case *ast.IndexListExpr:
 		t = x.X
 	}
-	if id, ok := t.(*ast.Ident); ok {
-		return id.Name + "." + d.Name.Name
-	}
-	return d.Name.Name
+	return t.(*ast.Ident).Name + "." + d.Name.Name
 }
 
 // frame is one node on the path from the walk's root to the visited node,
@@ -640,7 +686,7 @@ func (e *enumerator) walk(f *file, root ast.Node, scope string, fn *ast.FuncType
 		}
 		if e.constantSite(n) {
 			if constant == 0 {
-				e.addSkip(f, n, "constant expression")
+				e.addSkip(f, n, spec.SkipConstant)
 			}
 			constant++
 		}
@@ -740,75 +786,67 @@ func (e *enumerator) swapped(f *file, s *site, opPos token.Pos, op token.Token, 
 
 // equality makes the mutants of == and !=: true and false. Every such
 // comparison is a site, whatever its operands' types, because each of its
-// kinds needs only the comparison's result.
+// kinds needs only the comparison's result. The walk skips a constant
+// comparison.
 func (e *enumerator) equality(f *file, n *ast.BinaryExpr, scope string) {
 	tv := e.pkg.info.Types[n]
-	if tv.Value != nil || tv.Type == nil {
-		return
-	}
 	if !isPlainBool(tv.Type) {
-		e.addSkip(f, n, "named boolean result")
+		e.addSkip(f, n, spec.SkipNamedBool)
 		return
 	}
 	s := e.newSite(f, n, scope)
 	whole := e.text(f, n)
-	s.add("ror-true", "true", "("+whole+" || true)")
-	s.add("ror-false", "false", "("+whole+" && false)")
+	s.add(spec.RORTrue, "true", "("+whole+" || true)")
+	s.add(spec.RORFalse, "false", "("+whole+" && false)")
 }
 
 // ordered makes the mutants of <, <=, > and >=: the boundary, and false for
-// < and > or true for <= and >=.
+// < and > or true for <= and >=. The walk skips a constant comparison.
 func (e *enumerator) ordered(f *file, n *ast.BinaryExpr, scope string) {
 	info := e.pkg.info
 	tv := info.Types[n]
-	if tv.Value != nil || tv.Type == nil {
-		return
-	}
 	operand := operandType(info, n)
 	switch {
 	case !isPlainBool(tv.Type):
-		e.addSkip(f, n, "named boolean result")
+		e.addSkip(f, n, spec.SkipNamedBool)
 		return
 	case isTypeParam(operand):
-		e.addSkip(f, n, "operand of type-parameter type")
+		e.addSkip(f, n, spec.SkipTypeParameter)
 		return
 	case e.contextShift(operand, n):
-		e.addSkip(f, n, "untyped constant in a non-constant shift")
+		e.addSkip(f, n, spec.SkipContextShift)
 		return
 	}
 	s := e.newSite(f, n, scope)
 	whole := e.text(f, n)
-	s.add("ror-boundary", e.swapped(f, s, n.OpPos, n.Op, boundary[n.Op], false), e.swapped(f, s, n.OpPos, n.Op, boundary[n.Op], true))
+	s.add(spec.RORBoundary, e.swapped(f, s, n.OpPos, n.Op, boundary[n.Op], false), e.swapped(f, s, n.OpPos, n.Op, boundary[n.Op], true))
 	if n.Op == token.LEQ || n.Op == token.GEQ {
-		s.add("ror-true", "true", "("+whole+" || true)")
+		s.add(spec.RORTrue, "true", "("+whole+" || true)")
 	} else {
-		s.add("ror-false", "false", "("+whole+" && false)")
+		s.add(spec.RORFalse, "false", "("+whole+" && false)")
 	}
 }
 
-// arithmetic makes the mutant of +, -, *, / and % on numbers whose operands
-// and result have one type. A mutant that divides an integer by a constant
-// 0 is not viable, because the compiler rejects the division.
+// arithmetic makes the mutant of +, -, *, / and % on numbers. The package
+// type-checks, so both operands and the result have one type. A mutant that
+// divides an integer by a constant 0 is not viable, because the compiler
+// rejects the division. The walk skips constant arithmetic on numbers.
 func (e *enumerator) arithmetic(f *file, n *ast.BinaryExpr, scope string) {
 	info := e.pkg.info
-	tv := info.Types[n]
-	if tv.Value != nil || tv.Type == nil {
-		return
-	}
 	operand := operandType(info, n)
-	if operand == nil || !isNumber(operand) || !types.Identical(tv.Type, operand) {
+	if !isNumber(operand) {
 		return
 	}
 	switch {
 	case isTypeParam(operand):
-		e.addSkip(f, n, "operand of type-parameter type")
+		e.addSkip(f, n, spec.SkipTypeParameter)
 		return
 	case e.contextShift(operand, n):
-		e.addSkip(f, n, "untyped constant in a non-constant shift")
+		e.addSkip(f, n, spec.SkipContextShift)
 		return
 	}
 	s := e.newSite(f, n, scope)
-	m := s.add("aor", e.swapped(f, s, n.OpPos, n.Op, arith[n.Op], false), e.swapped(f, s, n.OpPos, n.Op, arith[n.Op], true))
+	m := s.add(spec.AOR, e.swapped(f, s, n.OpPos, n.Op, arith[n.Op], false), e.swapped(f, s, n.OpPos, n.Op, arith[n.Op], true))
 	m.notViable = arith[n.Op] == token.QUO && zeroDivisor(info, operand, n.Y)
 }
 
@@ -832,23 +870,18 @@ func operandType(info *types.Info, n *ast.BinaryExpr) types.Type {
 // in the package. Such a constant takes its type from the expression around
 // it.
 func (e *enumerator) contextShift(operand types.Type, n *ast.BinaryExpr) bool {
-	if _, ok := e.typeName(operand); ok {
-		return false
-	}
-	return hasContextShift(e.pkg.info, n.X) || hasContextShift(e.pkg.info, n.Y)
+	return !e.resolves(operand) && (e.hasContextShift(n.X) || e.hasContextShift(n.Y))
 }
 
 // connector makes the mutants of && and ||: each operand alone, and false
 // for && or true for ||. The form of a mutant keeps each operand that it
 // does not evaluate behind a constant that skips it. Each operand of the
-// site is recorded, so that no negation of it is made.
+// site is recorded, so that no negation of it is made. The walk skips a
+// constant connector.
 func (e *enumerator) connector(f *file, n *ast.BinaryExpr, scope string) {
 	tv := e.pkg.info.Types[n]
-	if tv.Value != nil {
-		return
-	}
 	if !isPlainBool(tv.Type) {
-		e.addSkip(f, n, "named boolean result")
+		e.addSkip(f, n, spec.SkipNamedBool)
 		return
 	}
 	e.operands[ast.Unparen(n.X)] = true
@@ -856,12 +889,12 @@ func (e *enumerator) connector(f *file, n *ast.BinaryExpr, scope string) {
 	s := e.newSite(f, n, scope)
 	a, b := e.text(f, n.X), e.text(f, n.Y)
 	op, pa, pb := n.Op.String(), "("+a+")", "("+b+")"
-	s.add("lcr-left", a, "("+pa+" || false && "+pb+")")
-	s.add("lcr-right", b, "(false && "+pa+" || "+pb+")")
+	s.add(spec.LCRLeft, a, "("+pa+" || false && "+pb+")")
+	s.add(spec.LCRRight, b, "(false && "+pa+" || "+pb+")")
 	if n.Op == token.LOR {
-		s.add("lcr-true", "true", "(true || "+pa+" "+op+" "+pb+")")
+		s.add(spec.LCRTrue, "true", "(true || "+pa+" "+op+" "+pb+")")
 	} else {
-		s.add("lcr-false", "false", "(false && ("+pa+" "+op+" "+pb+"))")
+		s.add(spec.LCRFalse, "false", "(false && ("+pa+" "+op+" "+pb+"))")
 	}
 }
 
@@ -869,23 +902,23 @@ func (e *enumerator) connector(f *file, n *ast.BinaryExpr, scope string) {
 // mutant that divides an integer by a constant 0 is not viable.
 func (e *enumerator) compound(f *file, n *ast.AssignStmt, scope string) {
 	to, ok := assign[n.Tok]
-	if !ok || len(n.Lhs) != 1 {
+	if !ok {
 		return
 	}
 	t := e.pkg.info.TypeOf(n.Lhs[0])
-	if t == nil || !isNumber(t) {
+	if !isNumber(t) {
 		return
 	}
 	switch {
 	case isTypeParam(t):
-		e.addSkip(f, n, "operand of type-parameter type")
+		e.addSkip(f, n, spec.SkipTypeParameter)
 		return
 	case !sideEffectFree(n.Lhs[0]):
-		e.addSkip(f, n, "assignment target with side effects")
+		e.addSkip(f, n, spec.SkipSideEffects)
 		return
 	}
 	s := e.newSite(f, n, scope)
-	m := s.add("aor", e.swapped(f, s, n.TokPos, n.Tok, to, false), e.swapped(f, s, n.TokPos, n.Tok, to, true))
+	m := s.add(spec.AOR, e.swapped(f, s, n.TokPos, n.Tok, to, false), e.swapped(f, s, n.TokPos, n.Tok, to, true))
 	m.notViable = to == token.QUO_ASSIGN && zeroDivisor(e.pkg.info, t, n.Rhs[0])
 }
 
@@ -893,7 +926,7 @@ func (e *enumerator) compound(f *file, n *ast.AssignStmt, scope string) {
 // statement list or in a for loop's post statement.
 func (e *enumerator) incdec(f *file, n *ast.IncDecStmt, parent ast.Node, scope string) {
 	t := e.pkg.info.TypeOf(n.X)
-	if t == nil || !isNumber(t) {
+	if !isNumber(t) {
 		return
 	}
 	switch p := parent.(type) {
@@ -904,10 +937,10 @@ func (e *enumerator) incdec(f *file, n *ast.IncDecStmt, parent ast.Node, scope s
 		}
 		switch {
 		case isTypeParam(t):
-			e.addSkip(f, n, "operand of type-parameter type")
+			e.addSkip(f, n, spec.SkipTypeParameter)
 			return
 		case !sideEffectFree(n.X):
-			e.addSkip(f, n, "assignment target with side effects")
+			e.addSkip(f, n, spec.SkipSideEffects)
 			return
 		}
 	default:
@@ -919,7 +952,7 @@ func (e *enumerator) incdec(f *file, n *ast.IncDecStmt, parent ast.Node, scope s
 	}
 	s := e.newSite(f, n, scope)
 	text := e.swapped(f, s, n.TokPos, n.Tok, to, false)
-	s.add("uoi-incdec", text, text)
+	s.add(spec.UOIIncDec, text, text)
 }
 
 // not negates a boolean operand: an identifier, a selector, a call, an
@@ -960,14 +993,6 @@ func (e *enumerator) not(f *file, x ast.Expr, parent ast.Node, scope string) {
 		if p.Key == x {
 			return
 		}
-	case *ast.SelectorExpr:
-		if ast.Expr(p.Sel) == x {
-			return
-		}
-	case *ast.CallExpr:
-		if p.Fun == x {
-			return
-		}
 	case *ast.IncDecStmt, *ast.ExprStmt, *ast.DeferStmt, *ast.GoStmt, *ast.RangeStmt:
 		return
 	}
@@ -977,27 +1002,28 @@ func (e *enumerator) not(f *file, x ast.Expr, parent ast.Node, scope string) {
 	if operand != nil {
 		replacement = e.text(f, operand)
 	}
-	s.add("uoi-not", replacement, "("+text+" != true)")
+	s.add(spec.UOINot, replacement, "("+text+" != true)")
 }
 
 // minus makes the mutant of a unary minus whose value is not a constant.
 func (e *enumerator) minus(f *file, n *ast.UnaryExpr, scope string) {
 	tv := e.pkg.info.Types[n]
-	if tv.Value != nil || tv.Type == nil || !isNumber(tv.Type) {
+	if tv.Value != nil || !isNumber(tv.Type) {
 		return
 	}
 	if isTypeParam(tv.Type) {
-		e.addSkip(f, n, "operand of type-parameter type")
+		e.addSkip(f, n, spec.SkipTypeParameter)
 		return
 	}
 	s := e.newSite(f, n, scope)
 	operand := e.text(f, n.X)
-	s.add("uoi-minus", operand, "("+operand+")")
+	s.add(spec.UOIMinus, operand, "("+operand+")")
 }
 
 // delete removes one statement of a statement list. It keeps declarations,
-// labels, branches, returns, increments and decrements, and a last
-// statement that terminates its list.
+// branches, returns, increments and decrements, every statement that
+// contains a label, and the list's final statement that is not empty when
+// that statement is terminating.
 func (e *enumerator) delete(f *file, st ast.Stmt, parent ast.Node, scope string) {
 	var list []ast.Stmt
 	switch p := parent.(type) {
@@ -1023,12 +1049,12 @@ func (e *enumerator) delete(f *file, st ast.Stmt, parent ast.Node, scope string)
 	default:
 		return
 	}
-	if list[len(list)-1] == st && isTerminating(e.pkg.info, st) || hasLabel(st) {
+	if hasLabel(st) || final(list) == st && e.isTerminating(st) {
 		return
 	}
 	s := e.newSite(f, st, scope)
 	s.stmt = st
-	s.add("sbr-delete", "", "if false {\n"+e.text(f, st)+"\n}")
+	s.add(spec.SBRDelete, "", "if false {\n"+e.text(f, st)+"\n}")
 }
 
 // zero makes the mutant that returns the zero value of every result type
@@ -1036,7 +1062,7 @@ func (e *enumerator) delete(f *file, st ast.Stmt, parent ast.Node, scope string)
 // mutant does not evaluate the results, and its form keeps the original
 // return after the new one, where it never runs.
 func (e *enumerator) zero(f *file, n *ast.ReturnStmt, fn *ast.FuncType, scope string) {
-	if fn == nil || fn.Results == nil || len(n.Results) == 0 || allZero(e.pkg.info, n.Results) {
+	if fn == nil || fn.Results == nil || len(n.Results) == 0 || e.allZero(n.Results) {
 		return
 	}
 	var zeros []string
@@ -1048,7 +1074,7 @@ func (e *enumerator) zero(f *file, n *ast.ReturnStmt, fn *ast.FuncType, scope st
 	}
 	ret := "return " + strings.Join(zeros, ", ")
 	s := e.newSite(f, n, scope)
-	s.add("sbr-zero", ret, "if true {\n"+ret+"\n}\n"+e.text(f, n))
+	s.add(spec.SBRZero, ret, "if true {\n"+ret+"\n}\n"+e.text(f, n))
 }
 
 // callee returns the object that call calls, as the type checker resolves
@@ -1106,15 +1132,17 @@ func (e *enumerator) family(f *file, call *ast.CallExpr) {
 		return
 	}
 	info := e.pkg.info
-	for _, c := range e.ov.Families.Capacity {
-		if c.Func != name || c.Argument >= len(call.Args) {
-			continue
+	for family, rules := range e.ov.Families {
+		for _, a := range rules.Arguments {
+			if a.Func != name || a.Argument >= len(call.Args) {
+				continue
+			}
+			if name == spec.Make && allocated(info.TypeOf(call.Args[0])) != a.Of {
+				continue
+			}
+			arg := call.Args[a.Argument]
+			e.suppressions = append(e.suppressions, suppression{f: f, start: e.off(arg.Pos()), end: e.off(arg.End()), family: family})
 		}
-		if name == "make" && allocated(info.TypeOf(call.Args[0])) != c.Of {
-			continue
-		}
-		arg := call.Args[c.Argument]
-		e.suppressions = append(e.suppressions, suppression{f: f, start: e.off(arg.Pos()), end: e.off(arg.End()), family: "capacity"})
 	}
 }
 
@@ -1131,9 +1159,11 @@ func (e *enumerator) method(fn *types.Func) (string, bool) {
 		return "", false
 	}
 	bare := types.NewSignatureType(nil, nil, nil, unnamed(sig.Params()), unnamed(sig.Results()), sig.Variadic())
-	for _, m := range e.ov.Families.Methods {
-		if m.On == "interface" && m.Name == fn.Name() && m.Signature == bare.String() {
-			return m.Family, true
+	for family, rules := range e.ov.Families {
+		for _, m := range rules.Methods {
+			if m.On == spec.OnInterface && m.Name == fn.Name() && m.Signature == bare.String() {
+				return family, true
+			}
 		}
 	}
 	return "", false
@@ -1147,10 +1177,6 @@ func (e *enumerator) method(fn *types.Func) (string, bool) {
 // takes. A declaration without values assigns nothing.
 func (e *enumerator) resultVariables() map[*types.Var]string {
 	info := e.pkg.info
-	rules := map[spec.Result]bool{}
-	for _, r := range e.ov.Families.Results {
-		rules[r] = true
-	}
 	// result returns the family of a rule that the result at index k of
 	// call matches, or "". The package type-checks, so the called function
 	// of a listed API has a signature with a result at index k.
@@ -1163,8 +1189,11 @@ func (e *enumerator) resultVariables() map[*types.Var]string {
 			return ""
 		}
 		results := info.TypeOf(call.Fun).(*types.Signature).Results()
-		if rules[spec.Result{Family: family, Type: types.TypeString(results.At(k).Type(), nil)}] {
-			return family
+		named := types.TypeString(results.At(k).Type(), nil)
+		for _, r := range e.ov.Families[family].Results {
+			if r.Type == named {
+				return family
+			}
 		}
 		return ""
 	}
@@ -1265,18 +1294,14 @@ func unnamed(t *types.Tuple) *types.Tuple {
 	return types.NewTuple(vars...)
 }
 
-// allocated names the kind of collection that make allocates for t.
+// allocated names the kind of collection that make allocates for t, as an
+// argument rule names it, or "" for a channel, which no rule names.
 func allocated(t types.Type) string {
-	if t == nil {
-		return ""
-	}
 	switch t.Underlying().(type) {
 	case *types.Slice:
-		return "slice"
+		return spec.OfSlice
 	case *types.Map:
-		return "map"
-	case *types.Chan:
-		return "chan"
+		return spec.OfMap
 	}
 	return ""
 }
@@ -1300,7 +1325,7 @@ func (e *enumerator) parseAnnotations(f *file) {
 			list, reason, ok := strings.Cut(rest, ":")
 			reason = strings.TrimSpace(reason)
 			if !ok || reason == "" {
-				e.errors = append(e.errors, "annotation-without-reason")
+				e.errors = append(e.errors, spec.ErrorWithoutReason)
 				continue
 			}
 			kinds := map[string]bool{}
@@ -1351,11 +1376,11 @@ func (e *enumerator) result(lines []string) *Result {
 	}
 	for _, a := range e.annotations {
 		if !a.used {
-			e.errors = append(e.errors, "stale-annotation")
+			e.errors = append(e.errors, spec.ErrorStale)
 		}
 	}
 	r := &Result{Forms: map[string]Form{}, Static: map[string]string{}}
-	r.Expect = spec.Expect{Language: "go", Lines: lines, Mutants: []spec.ExpectMutant{}, Skipped: []spec.Skip{}, Errors: dedupe(e.errors)}
+	r.Expect = spec.Expect{Language: e.ov.Language, Lines: lines, Mutants: []spec.ExpectMutant{}, Skipped: []spec.Skip{}, Errors: dedupe(e.errors)}
 	for _, m := range all {
 		s := m.site
 		start, end := e.pos(s.f, s.start), e.pos(s.f, s.end)
@@ -1375,11 +1400,11 @@ func (e *enumerator) result(lines []string) *Result {
 		r.Forms[m.key] = Form{File: s.f.name, Start: s.start, End: s.end, Text: m.form}
 		switch {
 		case !selected:
-			r.Static[m.key] = "not-selected"
+			r.Static[m.key] = spec.NotSelected
 		case rule != "" || reason != "":
-			r.Static[m.key] = "suppressed"
+			r.Static[m.key] = spec.Suppressed
 		case notViable:
-			r.Static[m.key] = "not-viable"
+			r.Static[m.key] = spec.NotViable
 		}
 	}
 	sort.SliceStable(e.skips, func(i, j int) bool {
@@ -1415,7 +1440,7 @@ func (e *enumerator) suppress(m *mutant) {
 	}
 	line := e.pos(s.f, s.start).Line
 	for _, a := range e.annotations {
-		if a.f == s.f && a.line == line && (a.kinds[m.kind] || a.kinds[e.classes[m.kind]] || a.kinds["all"]) {
+		if a.f == s.f && a.line == line && (a.kinds[m.kind] || a.kinds[e.classes[m.kind]] || a.kinds[e.cat.Every]) {
 			m.reason = a.reason
 			a.used = true
 			return
@@ -1446,9 +1471,16 @@ func (e *enumerator) pos(f *file, offset int) spec.Position {
 // SHA-256 digest of the prefix, the file, the scope, the kind, the tokens
 // and the occurrence in decimal, separated by NUL bytes.
 func Key(prefix, file, scope, kind, tokens string, occurrence int) string {
-	sum := sha256.Sum256([]byte(strings.Join([]string{prefix, file, scope, kind, tokens, strconv.Itoa(occurrence)}, "\x00")))
-	return hex.EncodeToString(sum[:])[:16]
+	sum := sha256.Sum256([]byte(strings.Join([]string{prefix, file, scope, kind, tokens, strconv.Itoa(occurrence)}, keySeparator)))
+	return hex.EncodeToString(sum[:])[:keyDigits]
 }
+
+// keySeparator separates the fields of a key's digest, and keyDigits is the
+// number of the digest's hexadecimal digits that the key keeps.
+const (
+	keySeparator = "\x00"
+	keyDigits    = 16
+)
 
 // Tokens returns the tokens of src joined by single spaces. Comments and
 // the semicolons that the scanner inserts at line ends are left out. An
@@ -1483,28 +1515,39 @@ func Tokens(src []byte) string {
 func Cut(original, replacement string) (string, string) {
 	o := []rune(strings.Join(strings.Fields(original), " "))
 	r := []rune(strings.Join(strings.Fields(replacement), " "))
-	if len(o) <= 120 && len(r) <= 120 {
+	if len(o) <= maxText && len(r) <= maxText {
 		return string(o), string(r)
 	}
 	same := 0
 	for same < len(o) && same < len(r) && o[same] == r[same] {
 		same++
 	}
-	start := max(0, same-40)
+	start := max(0, same-lead)
 	return window(o, start), window(r, start)
 }
 
+// The limits of a mutant's original and replacement as a record states
+// them: at most maxText characters each, with the window of a cut field
+// starting lead characters before the first difference, and an ellipsis in
+// place of the characters that the window leaves out.
+const (
+	maxText  = 120
+	lead     = 40
+	ellipsis = "…"
+)
+
 // window returns the characters of text from start, with an ellipsis in
-// place of the characters before start, and of those past 120 characters.
+// place of the characters before start, and of those past maxText
+// characters.
 func window(text []rune, start int) string {
-	head, room := "", 120
+	head, room := "", maxText
 	if start > 0 {
-		head, room = "…", 119
+		head, room = ellipsis, maxText-1
 	}
 	if len(text)-start <= room {
 		return head + string(text[start:])
 	}
-	return head + string(text[start:start+room-1]) + "…"
+	return head + string(text[start:start+room-1]) + ellipsis
 }
 
 func dedupe(list []string) []string {
@@ -1564,9 +1607,9 @@ func (e *enumerator) zeroOf(f *file, t ast.Expr) string {
 }
 
 // allZero reports whether every result is the zero value of its type.
-func allZero(info *types.Info, results []ast.Expr) bool {
-	for _, e := range results {
-		if !isZero(info, e) {
+func (e *enumerator) allZero(results []ast.Expr) bool {
+	for _, x := range results {
+		if !e.isZero(x) {
 			return false
 		}
 	}
@@ -1577,7 +1620,8 @@ func allZero(info *types.Info, results []ast.Expr) bool {
 // whose value is 0, "" or false, *new(T) of a type T, or a composite literal
 // of a struct or an array type whose every element is such a value. *new(x)
 // of an expression x is the value of x.
-func isZero(info *types.Info, x ast.Expr) bool {
+func (e *enumerator) isZero(x ast.Expr) bool {
+	info := e.pkg.info
 	x = ast.Unparen(x)
 	tv := info.Types[x]
 	if tv.IsNil() {
@@ -1589,23 +1633,18 @@ func isZero(info *types.Info, x ast.Expr) bool {
 			return !constant.BoolVal(v)
 		case constant.String:
 			return constant.StringVal(v) == ""
-		case constant.Int, constant.Float, constant.Complex:
-			return constant.Sign(v) == 0
 		}
-		return false
+		// The other constants are numbers.
+		return constant.Sign(v) == 0
 	}
 	switch n := x.(type) {
 	case *ast.StarExpr:
 		call, ok := ast.Unparen(n.X).(*ast.CallExpr)
-		if !ok || len(call.Args) != 1 {
-			return false
-		}
-		id, ok := ast.Unparen(call.Fun).(*ast.Ident)
 		if !ok {
 			return false
 		}
-		_, builtin := info.Uses[id].(*types.Builtin)
-		return builtin && id.Name == "new" && info.Types[call.Args[0]].IsType()
+		b, ok := e.callee(call).(*types.Builtin)
+		return ok && b.Name() == builtinNew && info.Types[call.Args[0]].IsType()
 	case *ast.CompositeLit:
 		switch tv.Type.Underlying().(type) {
 		case *types.Struct, *types.Array:
@@ -1616,7 +1655,7 @@ func isZero(info *types.Info, x ast.Expr) bool {
 			if kv, ok := elt.(*ast.KeyValueExpr); ok {
 				elt = kv.Value
 			}
-			if !isZero(info, elt) {
+			if !e.isZero(elt) {
 				return false
 			}
 		}
@@ -1626,44 +1665,50 @@ func isZero(info *types.Info, x ast.Expr) bool {
 }
 
 // isTerminating reports whether s is a terminating statement in the sense
-// of the Go specification. It errs towards yes, which only keeps a
-// statement from being deleted.
-func isTerminating(info *types.Info, s ast.Stmt) bool {
+// of the Go specification, by the rule that go/types applies, for a
+// statement that contains no labelled statement. delete keeps every
+// statement that contains a label, so a break with a label never decides
+// a deletion.
+func (e *enumerator) isTerminating(s ast.Stmt) bool {
 	switch s := s.(type) {
 	case *ast.ReturnStmt:
 		return true
 	case *ast.BranchStmt:
-		return s.Tok == token.GOTO
+		return s.Tok == token.GOTO || s.Tok == token.FALLTHROUGH
 	case *ast.ExprStmt:
-		call, ok := s.X.(*ast.CallExpr)
+		call, ok := ast.Unparen(s.X).(*ast.CallExpr)
 		if !ok {
 			return false
 		}
-		id, ok := ast.Unparen(call.Fun).(*ast.Ident)
-		if !ok {
-			return false
-		}
-		_, builtin := info.Uses[id].(*types.Builtin)
-		return builtin && id.Name == "panic"
+		b, ok := e.callee(call).(*types.Builtin)
+		return ok && b.Name() == builtinPanic
 	case *ast.BlockStmt:
-		return len(s.List) > 0 && isTerminating(info, s.List[len(s.List)-1])
+		return e.terminates(s.List)
 	case *ast.IfStmt:
-		return s.Else != nil && isTerminating(info, s.Body) && isTerminating(info, s.Else)
+		return s.Else != nil && e.isTerminating(s.Body) && e.isTerminating(s.Else)
 	case *ast.ForStmt:
-		return s.Cond == nil
+		return s.Cond == nil && !breaks(s.Body)
 	case *ast.SwitchStmt:
-		return clausesTerminate(info, s.Body)
+		return hasDefault(s.Body) && e.clausesTerminate(s.Body)
 	case *ast.TypeSwitchStmt:
-		return clausesTerminate(info, s.Body)
+		return hasDefault(s.Body) && e.clausesTerminate(s.Body)
 	case *ast.SelectStmt:
-		return clausesTerminate(info, s.Body)
-	case *ast.LabeledStmt:
-		return isTerminating(info, s.Stmt)
+		return e.clausesTerminate(s.Body)
 	}
 	return false
 }
 
-func clausesTerminate(info *types.Info, body *ast.BlockStmt) bool {
+// terminates reports whether a statement list ends in a terminating
+// statement: its final statement that is not empty is one.
+func (e *enumerator) terminates(list []ast.Stmt) bool {
+	last := final(list)
+	return last != nil && e.isTerminating(last)
+}
+
+// clausesTerminate reports whether the statement list of every clause of a
+// switch, a type switch or a select statement ends in a terminating
+// statement and contains no break of the statement.
+func (e *enumerator) clausesTerminate(body *ast.BlockStmt) bool {
 	for _, c := range body.List {
 		var list []ast.Stmt
 		switch c := c.(type) {
@@ -1672,18 +1717,44 @@ func clausesTerminate(info *types.Info, body *ast.BlockStmt) bool {
 		case *ast.CommClause:
 			list = c.Body
 		}
-		if len(list) == 0 {
-			return false
-		}
-		last := list[len(list)-1]
-		if b, ok := last.(*ast.BranchStmt); ok && b.Tok == token.FALLTHROUGH {
-			continue
-		}
-		if !isTerminating(info, last) {
+		if !e.terminates(list) || slices.ContainsFunc(list, breaks) {
 			return false
 		}
 	}
 	return true
+}
+
+// final returns the last statement of list that is not empty, or nil when
+// list has none.
+func final(list []ast.Stmt) ast.Stmt {
+	for i := len(list) - 1; i >= 0; i-- {
+		if _, empty := list[i].(*ast.EmptyStmt); !empty {
+			return list[i]
+		}
+	}
+	return nil
+}
+
+// hasDefault reports whether the body of a switch or a type switch
+// statement has a default clause.
+func hasDefault(body *ast.BlockStmt) bool {
+	return slices.ContainsFunc(body.List, func(c ast.Stmt) bool { return c.(*ast.CaseClause).List == nil })
+}
+
+// breaks reports whether s is or contains a break statement without a label
+// that ends the closest for, switch or select statement around s. A break
+// inside a nested for, range, switch, type switch or select statement ends
+// that statement.
+func breaks(s ast.Stmt) bool {
+	switch s := s.(type) {
+	case *ast.BranchStmt:
+		return s.Tok == token.BREAK && s.Label == nil
+	case *ast.BlockStmt:
+		return slices.ContainsFunc(s.List, breaks)
+	case *ast.IfStmt:
+		return breaks(s.Body) || s.Else != nil && breaks(s.Else)
+	}
+	return false
 }
 
 func hasLabel(s ast.Stmt) bool {
@@ -1711,29 +1782,30 @@ func isTypeParam(t types.Type) bool {
 }
 
 // isNumber reports whether t is an integer or floating-point type, or a
-// type parameter whose every type is one.
+// type parameter whose every type is one. A type parameter is one when
+// types.Satisfies reports that it satisfies numbers. go/types computes the
+// parameter's type set through embedded constraints, unions and
+// intersections.
 func isNumber(t types.Type) bool {
 	if tp, ok := types.Unalias(t).(*types.TypeParam); ok {
-		iface, _ := tp.Underlying().(*types.Interface)
-		if iface == nil || iface.NumEmbeddeds() == 0 {
-			return false
-		}
-		for i := range iface.NumEmbeddeds() {
-			u, ok := iface.EmbeddedType(i).(*types.Union)
-			if !ok {
-				return false
-			}
-			for j := range u.Len() {
-				if !isNumber(u.Term(j).Type()) {
-					return false
-				}
-			}
-		}
-		return true
+		return types.Satisfies(tp, numbers)
 	}
 	b, ok := t.Underlying().(*types.Basic)
 	return ok && b.Info()&(types.IsInteger|types.IsFloat) != 0
 }
+
+// numbers is the constraint whose type set is every type whose underlying
+// type is a typed integer or floating-point type. It is complete, so
+// concurrent enumerations only read it.
+var numbers = func() *types.Interface {
+	var terms []*types.Term
+	for _, b := range types.Typ {
+		if b.Info()&types.IsUntyped == 0 && b.Info()&(types.IsInteger|types.IsFloat) != 0 {
+			terms = append(terms, types.NewTerm(true, b))
+		}
+	}
+	return types.NewInterfaceType(nil, []types.Type{types.NewUnion(terms)}).Complete()
+}()
 
 // isPlainBool reports whether t is bool or an untyped boolean.
 func isPlainBool(t types.Type) bool {
@@ -1741,37 +1813,27 @@ func isPlainBool(t types.Type) bool {
 	return ok && (b.Kind() == types.Bool || b.Kind() == types.UntypedBool)
 }
 
-func isUntyped(t types.Type) bool {
-	b, ok := types.Unalias(t).(*types.Basic)
-	return ok && b.Info()&types.IsUntyped != 0
-}
-
-// typeName returns a name for t that resolves in every file of the package
-// without a new import: a predeclared type, or a type without type
-// parameters that the package declares at package level.
-func (e *enumerator) typeName(t types.Type) (string, bool) {
-	switch x := types.Unalias(t).(type) {
-	case *types.Basic:
-		if x.Info()&types.IsUntyped != 0 || x.Kind() == types.UnsafePointer {
-			return "", false
-		}
-		return x.Name(), true
-	case *types.Named:
-		obj := x.Obj()
-		if obj.Pkg() == e.pkg.types && x.TypeArgs().Len() == 0 && obj.Parent() == e.pkg.types.Scope() {
-			return obj.Name(), true
-		}
+// resolves reports whether t has a name that resolves in every file of the
+// package without a new import: a predeclared type, or a type without type
+// parameters that the package declares at package level. t is the type of
+// the operands of arithmetic or of an ordered comparison, which is a typed
+// basic type or a named type.
+func (e *enumerator) resolves(t types.Type) bool {
+	n, ok := types.Unalias(t).(*types.Named)
+	if !ok {
+		return true
 	}
-	return "", false
+	obj := n.Obj()
+	return obj.Pkg() == e.pkg.types && n.TypeArgs().Len() == 0 && obj.Parent() == e.pkg.types.Scope()
 }
 
 // hasContextShift reports whether x contains a non-constant shift whose
 // left operand is an untyped constant.
-func hasContextShift(info *types.Info, x ast.Expr) bool {
+func (e *enumerator) hasContextShift(x ast.Expr) bool {
 	found := false
 	ast.Inspect(x, func(n ast.Node) bool {
 		b, ok := n.(*ast.BinaryExpr)
-		if ok && (b.Op == token.SHL || b.Op == token.SHR) && info.Types[b].Value == nil && untypedConst(info, b.X) {
+		if ok && (b.Op == token.SHL || b.Op == token.SHR) && e.pkg.info.Types[b].Value == nil && e.untypedConst(b.X) {
 			found = true
 		}
 		return !found
@@ -1780,25 +1842,18 @@ func hasContextShift(info *types.Info, x ast.Expr) bool {
 }
 
 // untypedConst reports whether x is an untyped constant expression. The
-// type checker records the type such a constant converts to, so the test
-// reads the syntax: literals, untyped named constants, and operators on
-// them.
-func untypedConst(info *types.Info, x ast.Expr) bool {
-	switch v := ast.Unparen(x).(type) {
-	case *ast.BasicLit:
-		return true
-	case *ast.Ident:
-		c, ok := info.Uses[v].(*types.Const)
-		return ok && isUntyped(c.Type())
-	case *ast.SelectorExpr:
-		c, ok := info.Uses[v.Sel].(*types.Const)
-		return ok && isUntyped(c.Type())
-	case *ast.UnaryExpr:
-		return untypedConst(info, v.X)
-	case *ast.BinaryExpr:
-		return untypedConst(info, v.X) && untypedConst(info, v.Y)
+// package's type information records the type that such a constant
+// converts to, so types.CheckExpr checks x again alone, at its own
+// position, where x keeps its untyped type. x type-checks in its package,
+// so it type-checks alone, and CheckExpr returns nil.
+func (e *enumerator) untypedConst(x ast.Expr) bool {
+	if e.pkg.info.Types[x].Value == nil {
+		return false
 	}
-	return false
+	alone := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}}
+	_ = types.CheckExpr(e.pkg.fset, e.pkg.types, x.Pos(), x, alone)
+	b, ok := alone.Types[x].Type.(*types.Basic)
+	return ok && b.Info()&types.IsUntyped != 0
 }
 
 func sideEffectFree(x ast.Expr) bool {

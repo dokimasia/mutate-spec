@@ -1,0 +1,56 @@
+warn sbr-delete 0: if err != nil { log.Printf("warning: %v", err) } -> "" [logging]
+warn ror-true 0: err != nil -> "true" [logging]
+warn ror-false 0: err != nil -> "false" [logging]
+warn sbr-delete 1: log.Printf("warning: %v", err) -> "" [logging]
+fail sbr-delete 0: if err != nil { log.Printf("failure: %v", err) return fmt.Errorf("fail: %w", err) } -> ""
+fail ror-true 0: err != nil -> "true"
+fail ror-false 0: err != nil -> "false"
+fail sbr-delete 1: log.Printf("failure: %v", err) -> "" [logging]
+fail sbr-zero 0: return fmt.Errorf("fail: %w", err) -> "return nil"
+each sbr-delete 0: for _, x := range xs { log.Printf("value: %d", x) } -> "" [logging]
+each sbr-delete 1: log.Printf("value: %d", x) -> "" [logging]
+drain sbr-delete 0: for x := range ch { log.Printf("value: %d", x) } -> ""
+drain sbr-delete 1: log.Printf("value: %d", x) -> "" [logging]
+flush sbr-delete 0: if _, err := w.Write(buf); err != nil { log.Printf("flush: %v", err) } -> ""
+flush ror-true 0: err != nil -> "true" [logging]
+flush ror-false 0: err != nil -> "false" [logging]
+flush sbr-delete 1: log.Printf("flush: %v", err) -> "" [logging]
+probe sbr-delete 0: if _, err := w.Write(nil); err != nil && ready() { log.Print("not ready") } -> ""
+probe lcr-left 0: err != nil && ready() -> "err != nil"
+probe lcr-right 0: err != nil && ready() -> "ready()"
+probe lcr-false 0: err != nil && ready() -> "false"
+probe ror-true 0: err != nil -> "true"
+probe ror-false 0: err != nil -> "false"
+probe sbr-delete 1: log.Print("not ready") -> "" [logging]
+level sbr-delete 0: switch err := check(); { case err == nil: log.Print("ok") default: log.Printf("failed: %v", err) } -> ""
+level ror-true 0: err == nil -> "true" [logging]
+level ror-false 0: err == nil -> "false" [logging]
+level sbr-delete 1: log.Print("ok") -> "" [logging]
+level sbr-delete 2: log.Printf("failed: %v", err) -> "" [logging]
+sign sbr-delete 0: switch { case n > 0: log.Print("positive") case n < 0: log.Print("negative") default: log.Print("zero") } -> "" [logging]
+sign ror-boundary 0: n > 0 -> "n >= 0" [logging]
+sign ror-false 0: n > 0 -> "false" [logging]
+sign sbr-delete 1: log.Print("positive") -> "" [logging]
+sign ror-boundary 1: n < 0 -> "n <= 0" [logging]
+sign ror-false 1: n < 0 -> "false" [logging]
+sign sbr-delete 2: log.Print("negative") -> "" [logging]
+sign sbr-delete 3: log.Print("zero") -> "" [logging]
+report sbr-delete 0: if ok { log.Print("ok") } else if d > 0 { time.Sleep(d) } -> "" [logging]
+report uoi-not 0: ok -> "!ok" [logging]
+report sbr-delete 1: log.Print("ok") -> "" [logging]
+report ror-boundary 0: d > 0 -> "d >= 0" [logging]
+report ror-false 0: d > 0 -> "false" [logging]
+report sbr-delete 2: time.Sleep(d) -> "" [timing]
+count sbr-delete 0: for i := 0; i < len(xs); i++ { log.Print(xs[i]) } -> "" [logging]
+count ror-boundary 0: i < len(xs) -> "i <= len(xs)" [logging]
+count ror-false 0: i < len(xs) -> "false" [logging]
+count uoi-incdec 0: i++ -> "i--" [logging]
+count sbr-delete 1: log.Print(xs[i]) -> "" [logging]
+count sbr-delete 2: for n = 0; n < len(xs); n++ { log.Print(xs[n]) } -> ""
+count ror-boundary 1: n < len(xs) -> "n <= len(xs)"
+count ror-false 1: n < len(xs) -> "false"
+count uoi-incdec 1: n++ -> "n--"
+count sbr-delete 3: log.Print(xs[n]) -> "" [logging]
+count sbr-zero 0: return n -> "return 0"
+nothing sbr-delete 0: if ok { } -> ""
+nothing uoi-not 0: ok -> "!ok"

@@ -19,8 +19,9 @@ A mutation engine measures a test suite by changing the code under test in
 small, defined ways and checking that a test fails. This RFC defines those
 changes once, for every language that dokimasia has an engine for. It
 defines five operator classes and thirteen kinds, the code exempt from
-mutation, the directive that makes a generated file a target, the two ways
-to suppress a mutant, and a key that identifies one mutant across runs.
+mutation, the directive and the run option that make generated files
+targets, the two ways to suppress a mutant, and a key that identifies one
+mutant across runs.
 Every engine applies the same catalogue, so a mutant in Go and the same
 mutant in Java have the same kind, the same exclusions and a key built by
 the same rule.
@@ -77,8 +78,8 @@ passes.
 
 | Component | What it defines | Where it is |
 |---|---|---|
-| The catalogue | The classes, the kinds, the rule families, the annotation, the include directive and the catalogue version | `spec/catalogue.json` in mutate-spec |
-| A language overlay | The syntax each kind applies to, how the language writes a zero value, the APIs, method rules and result rules of each rule family, the compound statements that a family suppresses, the comment syntax of the directives, how scopes are named, and the overlay's version | `spec/overlays/<language>.json` in mutate-spec |
+| The catalogue | The classes, the kinds, the rule families, the annotation and its keyword for every kind, the include directive and the catalogue version | `spec/catalogue.json` in mutate-spec |
+| A language overlay | The syntax each kind applies to, how the language writes a zero value, the rules of each rule family, the compound statements that a family suppresses, the comment syntax of the directives, how scopes are named, and the overlay's version | `spec/overlays/<language>.json` in mutate-spec |
 | The key | The identity of one mutant across runs | Computed by each engine from the rules below |
 
 Each engine vendors the catalogue and its language's overlay. The run
@@ -237,7 +238,7 @@ catch a wrong constant.
 |---|---|
 | Code the build does not compile for the target platform | A mutant there cannot change any test's result. 172 of gremlins' 318 mutants on btree were of this kind |
 | Test code | The run measures the tests. It does not change them |
-| Generated code, by the language's own convention, unless the file contains the include directive | A survivor there points at the generator's input, which the developer edits instead of the file. Go marks such a file with a line that matches `^// Code generated .* DO NOT EDIT\.$`. The record lists each such file with the number of mutants that it would have, so a reader sees how much code a score leaves out |
+| Generated code, by the language's own convention, unless the file contains the include directive or the run includes generated files | A survivor there points at the generator's input, which the developer edits instead of the file. Go marks such a file with a line that matches `^// Code generated .* DO NOT EDIT\.$`. The record lists each such file with the number of mutants that it would have, so a reader sees how much code a score leaves out |
 | Expressions the compiler evaluates before the program runs | A runtime switch cannot be placed in a constant. Go's constants and array lengths, and Rust's `const` and `static` items, are of this kind |
 
 An engine also skips any site that it cannot instrument for a reason of its
@@ -269,6 +270,20 @@ package wire
   the comments before the package clause, and a line anywhere else in the
   file has no effect.
 
+The caller can also include every generated file of a run. The run then
+measures generated code whose generator does not write the directive, such
+as the output of a generator from outside the repository:
+
+- The engine reads every generated file of the target as its own code, as
+  if the file contained the directive.
+- The record lists each generated file without the directive, with its
+  mutants and whether the run included it. Two records' scores count the
+  same mutants only when every generated file has the same inclusion in
+  both.
+- A file with the directive is the target's own code in every run, with or
+  without the option. A generator whose output a repository tests writes
+  the directive, so its scores compare across runs.
+
 ### Suppression
 
 A suppressed mutant is created and listed in the record with the reason. It
@@ -278,9 +293,11 @@ annotation suppresses it.
 #### Rule families
 
 The catalogue names five families of code whose mutants developers do not
-act on. Each family is a list of APIs per language, in the overlay. A
-mutant is suppressed when its site is a call to a listed API, or is inside
-the arguments of one.
+act on. The overlay states each family's rules in its language: the APIs
+whose calls are in the family, method rules, result rules, and argument
+rules, which put one argument of a call into the family. A mutant is
+suppressed when its site is a call that a rule puts into a family, or is
+inside the arguments of one, or is an argument that a rule names.
 
 | Family | APIs | Evidence |
 |---|---|---|
@@ -393,7 +410,7 @@ if v, ok := cache[key]; ok {
 - On a line of its own, the annotation applies to the sites that start on
   the next line. After code, it applies to the sites on its own line.
 - The kinds are a comma-separated list of kinds or classes, such as `ror` or
-  `sbr-delete`, or `all`.
+  `sbr-delete`, or the catalogue's keyword for every kind, `all`.
 - The reason after the colon is required. An annotation without one fails
   the run.
 - An annotation that does not suppress any mutant fails the run, so an
@@ -571,9 +588,9 @@ A run option or a project's configuration lists the generators whose files
 are targets, and the engine matches each name in a file's generated header,
 such as `codecgen` in `// Code generated by codecgen. DO NOT EDIT.`
 
-**Why not:** two runs of one target with different options would count
-different mutants, and nothing in a file would show that it is a target.
-The generator's name in a header is free text, which no language defines.
+**Why not:** the generator's name in a header is free text, which no
+language defines. The run option that includes every generated file names
+no generator, and the record states which files it included.
 
 ### Each library's helper interface in the overlay
 
@@ -641,8 +658,11 @@ excuses, in the same review.
 - **The helper family hides a test of the reported location.** A suite
   that checks the file and line a failure reports loses the mutants that
   would show a missing mark.
-- **A marked generated file counts as hand-written code.** One change to a
-  generator can add survivors in every file that it writes.
+- **A marked or included generated file counts as hand-written code.** One
+  change to a generator can add survivors in every file that it writes.
+- **Including generated files changes what a score counts.** A run with
+  the option and a run without it compare only through the record's list
+  of generated files.
 - **Scores compare only within a catalogue version and an overlay
   version.** Every minor version of either breaks the platform's trend for
   the projects it affects.

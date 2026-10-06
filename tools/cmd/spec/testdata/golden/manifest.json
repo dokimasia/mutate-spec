@@ -1,0 +1,15 @@
+{
+    "digest": "sha256:03d4205dee38e95814b4cf0750574499fca1d204fcfa1f5ec77797de8cc1a5c2",
+    "files": {
+        "VERSION": "sha256:9d8c94f1ad3ea96b1e2ac4914fda4cb93c76b4a3e0d8cc6dd8976d6c0b227d15",
+        "spec/catalogue.json": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "spec/corpus/c/case.json": "sha256:1a6537215be1b54614b9964b4a3a72babc7299192e5596c6e33bb1ff296e49a7",
+        "spec/corpus/c/go/f.go": "sha256:c9f09e0a76fbbf83847013f7d79aa09c1566778489cc499e76e3e5d72b1c8db6",
+        "spec/overlays/go.json": "sha256:1ac92d3632ee12ca4982cdbe2b6dc8101a0a6626ae90be30ec95382ea9f3eda9",
+        "spec/protocol.json": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "spec/record.schema.json": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "tools/spec-check.sh": "sha256:20f65c28671b40937c5bf23acc7c6f37e5a5ec0622e347b57685725df5ba9e50",
+        "tools/spec-sync.sh": "sha256:75c75efe327a8ef35a072f25117961f5b99e35035dc9bd86493dd29fd7bc07eb"
+    },
+    "version": "0.9.0"
+}

@@ -322,9 +322,10 @@ This equals StrykerJS's mutation score on the verdicts that both define:
 - An uncovered mutant counts as undetected.
 - A compile error and an ignored mutant are excluded.
 
-A run fails when it has a run error, or when any mutant is `not-run` or
-`error`, and then its score is `null`. The score is also `null` when the
-denominator is 0.
+A run fails when it has a run error, when any mutant is `error`, or when a
+mutant is `not-run` for another reason than the caller's limit on the
+number of mutant runs. The score of a failed run is `null`. The score is
+also `null` when the denominator is 0.
 
 A run without a run error whose mutants did not all run, because the
 caller's deadline passed, the caller ended the run, or the run had started
@@ -332,16 +333,18 @@ the number of mutants that the caller allowed, states a sample:
 
 - The sample is the mutants that the score counts and whose keys sort
   before the first key of a `not-run` mutant.
-- A limit on the number of mutants gives the same sample for the same code
-  on every machine. The sample of a deadline depends on the machine's
-  speed.
+- A limit on the number of mutant runs gives the same sample for the same
+  code on every machine. A run that the limit alone ends does not fail, and
+  its score is the score of its sample. The sample of a deadline depends
+  on the machine's speed, so a run that the deadline ends fails.
 - The engine starts the runs in key order, so the sample is a uniform
   sample of the target's mutants. On 158 Java projects, the score of a
   random sample of 1,000 mutants differed from the full score by -2.1 to
   +1.5 percentage points for 95% of the projects.
-- The record states the first key that did not run, the detected and the
-  undetected mutants of the sample, and their score by the formula above,
-  or `null` for an empty sample.
+- The record states the first key that did not run, the caller's limit
+  when the limit alone ended the runs, the detected and the undetected
+  mutants of the sample, and their score by the formula above, or `null`
+  for an empty sample.
 
 A timeout counts as detected, and the record lists each `timed-out` and
 `exhausted` mutant with the tests that were running, so that a gate can
@@ -392,10 +395,10 @@ One JSON document per run and target. The fields:
 | `control` | The opening run's `seconds`, `peakBytes`, `sites` and `sitesExecuted`, the ordinary run's `seconds` in a run that confirms its survivors, and the closing run's `seconds`. Absent when no opening control run passed, such as in a run without a mutant to run |
 | `errors` | The run errors, each with a `code` and a `message` |
 | `score` | The score, from 0 to 1, or `null` |
-| `sample` | For a run that the caller ended before every mutant ran: `before`, the first key that did not run, `detected`, `undetected`, and their `score`. `null` otherwise |
+| `sample` | For a run that the caller ended before every mutant ran: `before`, the first key that did not run, `limit`, the number of mutant runs that the caller allowed when that limit alone ended the runs, or `null`, `detected`, `undetected`, and their `score`. `null` otherwise |
 | `mutants` | Every mutant of the target, including the excluded ones |
-| `skipped` | Every site of a catalogue class in the target's own code that has no mutant, with its `reason`: a constant expression, or a limit of the engine. Test code, generated files and files outside the build are not listed |
-| `generated` | Each generated file of the target that the run leaves out, in the order of the target's files, with the number of `mutants` that the catalogue's kinds make at its sites. A generated file with the include directive is the target's own code and is not listed. A reader sees how much code a score leaves out |
+| `skipped` | Every site of a catalogue class in the target's own code that has no mutant, with its `reason`: a constant expression, or a limit of the engine. Test code, generated files that the run leaves out and files outside the build are not listed |
+| `generated` | Each generated file of the target without the include directive, in the order of the target's files, with the number of `mutants` that the catalogue's kinds make at its sites, and `included`, true when the caller included generated files. A generated file with the include directive is the target's own code and is not listed. A reader sees how much code a score leaves out, and which mutants come from generated code |
 
 Each mutant:
 
@@ -434,7 +437,7 @@ are illustrative, not measured:
   "record": "dokimi-mutate",
   "version": 1,
   "catalogue": "1.0.0",
-  "overlay": "1.0.0",
+  "overlay": "1.1.0",
   "engine": { "name": "mutate-go", "version": "0.1.0" },
   "toolchain": "go1.27.1",
   "target": { "language": "go", "name": "github.com/google/btree" },
@@ -484,7 +487,9 @@ define how a record is sent to the platform.
 A record whose `control` contains `ordinary` confirmed its survivors and
 its mutants without coverage. Its score counts the kills of the
 confirmation runs, so a reader compares it only with the scores of records
-that confirmed theirs.
+that confirmed theirs. A record whose `generated` list includes a file
+counts that file's mutants, so a reader compares it only with the scores
+of records that included the same files.
 
 ### Run errors
 
@@ -562,6 +567,9 @@ language:
   engine adds or misses fails the case.
 - `confirm` is `true` for a case whose run confirms its survivors.
   `confirmed` marks each mutant whose verdict a confirmation run decided.
+- `includeGenerated` is `true` for a case whose run includes the generated
+  files, and `sample` states the number of mutant runs that a case's run
+  allows.
 
 `<language>/expect.json` states what the language's record contains
 beyond the verdicts:
@@ -574,7 +582,7 @@ beyond the verdicts:
 | `mutants[].tests` | Where it is stated, the tests that the record names for the mutant |
 | `mutants[].coveredBy` | Where it is stated, the tests that the record names in the mutant's `coveredBy` |
 | `skipped`, `errors` | The record's skipped sites and run errors |
-| `generated` | The record's generated files, each with its mutants |
+| `generated` | The record's generated files, each with its mutants and whether the run included it |
 
 A reference enumerator writes each Go fixture's `expect.json` from the
 fixture's source and the type checker, and keeps the hand-written `lines`,
@@ -596,6 +604,8 @@ An engine passes a case when its record of the fixture contains:
   any order
 - the skipped sites, the generated files and the run errors stated, and no
   other
+- for a case that states `sample`, a `sample` whose `limit` is that number,
+  and a `score` equal to the sample's `score`
 
 | Case | What its fixture does | What it proves |
 |---|---|---|
@@ -610,8 +620,12 @@ An engine passes a case when its record of the fixture contains:
 | `cancel` | Calls of the cancel functions of contexts with and without a deadline, deferred and not, and of a variable that holds both | `suppressed` with the rule `timing` by the result rule, only where every value of the variable is the cancel function of a deadline API |
 | `compound` | Logging calls in an if, a range and a switch statement, beside a return, in an if and a switch after a header that calls an API outside the families, and in a range over a channel | `suppressed` with the rule `logging` for every site of a statement that only logs, and for the condition and the case expressions after such a header, and every other mutant kept |
 | `excluded` | A constant, a generated file and a file outside the build | No mutant in them, a `skipped` entry for the constant only, and the generated file in `generated` with its mutants |
+| `skipped` | Arithmetic on a type parameter whose constraint embeds another, a comparison of a named boolean type, a compound assignment to an element of a list, and a comparison with a shift of an untyped constant | No mutant at the four sites, and a `skipped` entry with the overlay's reason for each |
 | `included` | A generated file with the include directive in its header, and one with the directive after the package clause | Mutants in the first file only |
+| `generated-included` | A generated file without the include directive, in a run that includes generated files | Mutants in the generated file, which `generated` lists as included |
+| `sample` | Five mutants that the tests kill, in a run that allows two mutant runs | The two least keys run and every later mutant is `not-run`, and the run does not fail |
 | `zero` | Returns of zero values of every form, and of an empty list | No `sbr-zero` site where every result is a zero value, and zero values written as code writes them |
+| `terminating` | A final loop without a condition that a break ends, and a final switch without a default clause whose every clause returns | The deletion of each, because neither is terminating |
 | `unused` | Deletions, returns of zero values and connector mutants that leave out the only use of a variable, an import, a label or a type switch's symbol | Each runs, because its source writes that code behind a constant that skips it, and the tests kill it |
 | `confirm` | A test that skips while the instrumented program runs, another test that calls the same function without checking it, a function that only the skipped test calls, and a function that no test calls | Under confirmation, `killed` for the survivors and the mutants without coverage that the skipped test detects in their ordinary builds, `survived` for a survivor of both builds, `no-coverage` for the function that no test calls, `confirmed` on each of them, and no confirmation of a mutant that the instrumented program kills |
 | `covered-by` | Three functions and one test of each, where one function calls another | The tests that ran alone, and `coveredBy` with every test whose run alone executed a mutant's site |

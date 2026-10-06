@@ -2,7 +2,4 @@ module mutate-spec/tools
 
 go 1.27.0
 
-require (
-	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3 // indirect
-	golang.org/x/text v0.14.0 // indirect
-)
+require go.dokimi.dev/assert v0.0.0-20261006083336-cf337fea0d0f

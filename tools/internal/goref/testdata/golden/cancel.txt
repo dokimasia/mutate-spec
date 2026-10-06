@@ -1,0 +1,22 @@
+stop sbr-delete 0: (*f)() -> ""
+declared sbr-delete 0: defer cancel() -> "" [timing]
+assigned sbr-delete 0: parent, cancel = context.WithDeadline(parent, d) -> ""
+assigned sbr-delete 1: cancel() -> "" [timing]
+assigned sbr-delete 2: go cancel() -> "" [timing]
+assigned sbr-delete 3: defer func() { cancel() }() -> ""
+assigned sbr-delete 4: cancel() -> "" [timing]
+assigned sbr-delete 5: if cancel != nil { cancel() } -> "" [timing]
+assigned sbr-delete 6: cancel() -> "" [timing]
+untyped sbr-delete 0: _, f = context.WithTimeout(parent, time.Second) -> ""
+untyped sbr-delete 1: f() -> "" [timing]
+cancelled sbr-delete 0: defer cancel() -> ""
+mixed sbr-delete 0: if bound { _, cancel = context.WithTimeout(parent, time.Second) } -> ""
+mixed sbr-delete 1: _, cancel = context.WithTimeout(parent, time.Second) -> ""
+mixed sbr-delete 2: cancel() -> ""
+addressed sbr-delete 0: stop(&cancel) -> ""
+addressed sbr-delete 1: cancel() -> ""
+parameter sbr-delete 0: cancel() -> ""
+named sbr-delete 0: ctx, cancel = context.WithTimeout(context.Background(), time.Second) -> ""
+named sbr-delete 1: cancel() -> ""
+shared sbr-delete 0: _, global = context.WithTimeout(parent, time.Second) -> ""
+shared sbr-delete 1: global() -> ""
