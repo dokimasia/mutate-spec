@@ -444,7 +444,7 @@ are illustrative, not measured:
   "record": "dokimi-mutate",
   "version": 1,
   "catalogue": "1.0.0",
-  "overlay": "1.2.0",
+  "overlay": "1.3.0",
   "engine": { "name": "mutate-go", "version": "0.1.0" },
   "toolchain": "go1.27.1",
   "target": { "language": "go", "name": "github.com/google/btree" },
@@ -634,6 +634,7 @@ An engine passes a case when its record of the fixture contains:
 | `sample` | Five mutants that the tests kill, in a run that allows two mutant runs | The two least keys run and every later mutant is `not-run`, and the run does not fail |
 | `zero` | Returns of zero values of every form, of an empty list, and of a 0 and an empty string in an interface | No `sbr-zero` site where every result is the zero value of its result type, a site where an interface is not nil, and zero values written as code writes them |
 | `unwritten` | Returns of variables that declarations without values declare: two that no use writes, and one after each kind of write | No `sbr-zero` site at a return of a variable that no use writes, and a site after an assignment, a short variable declaration, an increment, a range clause, `&`, a slice expression, a method with a pointer receiver, a function literal, and a write after the return in a loop |
+| `shadowed` | Returns of local variables named `false`, `nil`, `new` and after a type, a return of named results that the body writes, a result named `_`, and a function whose local variables named `true` and `false` hold each other's value, which only a test that skips while the instrumented program runs calls | A return of zero values returns them whatever the site declares, and under confirmation the ordinary build of each mutant computes the constants, not the variables |
 | `terminating` | A final loop without a condition that a break ends, and a final switch without a default clause whose every clause returns | The deletion of each, because neither is terminating |
 | `unused` | Deletions, returns of zero values and connector mutants that leave out the only use of a variable, an import, a label or a type switch's symbol | Each runs, because its source writes that code behind a constant that skips it, and the tests kill it |
 | `confirm` | A test that skips while the instrumented program runs, another test that calls the same function without checking it, a function that only the skipped test calls, and a function that no test calls | Under confirmation, `killed` for the survivors and the mutants without coverage that the skipped test detects in their ordinary builds, `survived` for a survivor of both builds, `no-coverage` for the function that no test calls, `confirmed` on each of them, and no confirmation of a mutant that the instrumented program kills |

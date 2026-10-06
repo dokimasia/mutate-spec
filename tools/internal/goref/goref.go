@@ -43,7 +43,10 @@ const Language = "go"
 // the mutated expression does, and keeps the code that the mutant does not
 // run behind a constant that skips it, so every name that the site uses
 // remains in use, and the mutated file compiles wherever the original does
-// and the mutant is viable.
+// and the mutant is viable. No declaration of the program changes what a
+// form computes. A form writes each constant as an expression of literals,
+// and an sbr-zero form returns variables of its own, so its range starts
+// at the function's results.
 type Form struct {
 	File       string
 	Start, End int
@@ -281,13 +284,17 @@ type mutant struct {
 	site        *site
 	kind        string
 	replacement string
-	form        string
-	notViable   bool
-	rule        string
-	reason      string
-	key         string
-	occurrence  int
-	nth         int
+	// form replaces the source from the offset from to the site's end. from
+	// is the site's start, or for sbr-zero the offset of the first edit of
+	// the function's results.
+	form       string
+	from       int
+	notViable  bool
+	rule       string
+	reason     string
+	key        string
+	occurrence int
+	nth        int
 }
 
 type skip struct {
@@ -349,7 +356,7 @@ func (e *enumerator) file(f *file) {
 	for _, decl := range f.ast.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
-			e.walk(f, d, scopeOf(d), d.Type)
+			e.walk(f, d, scopeOf(d), &function{typ: d.Type, body: d.Body})
 		case *ast.GenDecl:
 			for _, sp := range d.Specs {
 				switch s := sp.(type) {
@@ -658,16 +665,23 @@ func scopeOf(d *ast.FuncDecl) string {
 	return t.(*ast.Ident).Name + "." + d.Name.Name
 }
 
+// function is a function declaration or a function literal: its type,
+// which lists its results, and its body.
+type function struct {
+	typ  *ast.FuncType
+	body *ast.BlockStmt
+}
+
 // frame is one node on the path from the walk's root to the visited node,
-// with the innermost function type around it.
+// with the innermost function around it.
 type frame struct {
 	node ast.Node
-	fn   *ast.FuncType
+	fn   *function
 }
 
 // walk visits root and every node below it. scope is the scope of every
 // site it finds, and fn the function around root, or nil.
-func (e *enumerator) walk(f *file, root ast.Node, scope string, fn *ast.FuncType) {
+func (e *enumerator) walk(f *file, root ast.Node, scope string, fn *function) {
 	var stack []frame
 	constant := 0
 	ast.Inspect(root, func(n ast.Node) bool {
@@ -698,7 +712,7 @@ func (e *enumerator) walk(f *file, root ast.Node, scope string, fn *ast.FuncType
 			outer = stack[i].node
 		}
 		if lit, ok := n.(*ast.FuncLit); ok {
-			inner = lit.Type
+			inner = &function{typ: lit.Type, body: lit.Body}
 		}
 		if call, ok := n.(*ast.CallExpr); ok {
 			e.family(f, call)
@@ -738,8 +752,9 @@ func (e *enumerator) constantSite(n ast.Node) bool {
 }
 
 // visit makes the sites of n, whose parent is parent. outer and around are
-// the position of n without its parentheses, as walk states them.
-func (e *enumerator) visit(f *file, n, parent, outer, around ast.Node, scope string, fn *ast.FuncType) {
+// the position of n without its parentheses, as walk states them, and fn is
+// the innermost function around n.
+func (e *enumerator) visit(f *file, n, parent, outer, around ast.Node, scope string, fn *function) {
 	switch x := n.(type) {
 	case *ast.BinaryExpr:
 		switch x.Op {
@@ -782,7 +797,7 @@ func (e *enumerator) addSkip(f *file, n ast.Node, reason string) {
 }
 
 func (s *site) add(kind, replacement, form string) *mutant {
-	m := &mutant{site: s, kind: kind, replacement: replacement, form: form}
+	m := &mutant{site: s, kind: kind, replacement: replacement, form: form, from: s.start}
 	s.mutants = append(s.mutants, m)
 	return m
 }
@@ -792,6 +807,19 @@ var (
 	boundary = map[token.Token]token.Token{token.LSS: token.LEQ, token.LEQ: token.LSS, token.GTR: token.GEQ, token.GEQ: token.GTR}
 	assign   = map[token.Token]token.Token{token.ADD_ASSIGN: token.SUB_ASSIGN, token.SUB_ASSIGN: token.ADD_ASSIGN, token.MUL_ASSIGN: token.QUO_ASSIGN, token.QUO_ASSIGN: token.MUL_ASSIGN, token.REM_ASSIGN: token.MUL_ASSIGN}
 )
+
+// The constants true and false as a form writes them: expressions of
+// literals, which no declaration can hide, as a local variable named false
+// hides the predeclared identifier.
+const (
+	trueExpr  = "(0 == 0)"
+	falseExpr = "(0 != 0)"
+)
+
+// zeroVar starts the name of each variable that an sbr-zero form returns,
+// followed by the result's index. The name starts with the engine's prefix
+// _mutate, which a fixture does not use.
+const zeroVar = "_mutateZero"
 
 // swapped returns the site's source with the operator at opPos replaced by
 // to. The form pads the new operator with spaces, so that it cannot merge
@@ -817,8 +845,8 @@ func (e *enumerator) equality(f *file, n *ast.BinaryExpr, scope string) {
 	}
 	s := e.newSite(f, n, scope)
 	whole := e.text(f, n)
-	s.add(spec.RORTrue, "true", "("+whole+" || true)")
-	s.add(spec.RORFalse, "false", "("+whole+" && false)")
+	s.add(spec.RORTrue, "true", "("+whole+" || "+trueExpr+")")
+	s.add(spec.RORFalse, "false", "("+whole+" && "+falseExpr+")")
 }
 
 // ordered makes the mutants of <, <=, > and >=: the boundary, and false for
@@ -842,9 +870,9 @@ func (e *enumerator) ordered(f *file, n *ast.BinaryExpr, scope string) {
 	whole := e.text(f, n)
 	s.add(spec.RORBoundary, e.swapped(f, s, n.OpPos, n.Op, boundary[n.Op], false), e.swapped(f, s, n.OpPos, n.Op, boundary[n.Op], true))
 	if n.Op == token.LEQ || n.Op == token.GEQ {
-		s.add(spec.RORTrue, "true", "("+whole+" || true)")
+		s.add(spec.RORTrue, "true", "("+whole+" || "+trueExpr+")")
 	} else {
-		s.add(spec.RORFalse, "false", "("+whole+" && false)")
+		s.add(spec.RORFalse, "false", "("+whole+" && "+falseExpr+")")
 	}
 }
 
@@ -910,12 +938,12 @@ func (e *enumerator) connector(f *file, n *ast.BinaryExpr, scope string) {
 	s := e.newSite(f, n, scope)
 	a, b := e.text(f, n.X), e.text(f, n.Y)
 	op, pa, pb := n.Op.String(), "("+a+")", "("+b+")"
-	s.add(spec.LCRLeft, a, "("+pa+" || false && "+pb+")")
-	s.add(spec.LCRRight, b, "(false && "+pa+" || "+pb+")")
+	s.add(spec.LCRLeft, a, "("+pa+" || "+falseExpr+" && "+pb+")")
+	s.add(spec.LCRRight, b, "("+falseExpr+" && "+pa+" || "+pb+")")
 	if n.Op == token.LOR {
-		s.add(spec.LCRTrue, "true", "(true || "+pa+" "+op+" "+pb+")")
+		s.add(spec.LCRTrue, "true", "("+trueExpr+" || "+pa+" "+op+" "+pb+")")
 	} else {
-		s.add(spec.LCRFalse, "false", "(false && ("+pa+" "+op+" "+pb+"))")
+		s.add(spec.LCRFalse, "false", "("+falseExpr+" && ("+pa+" "+op+" "+pb+"))")
 	}
 }
 
@@ -1025,7 +1053,7 @@ func (e *enumerator) not(f *file, x, outer ast.Expr, around ast.Node, scope stri
 	if operand != nil {
 		replacement = e.text(f, operand)
 	}
-	s.add(spec.UOINot, replacement, "("+text+" != true)")
+	s.add(spec.UOINot, replacement, "("+text+" != "+trueExpr+")")
 }
 
 // minus makes the mutant of a unary minus whose value is not a constant.
@@ -1077,31 +1105,79 @@ func (e *enumerator) delete(f *file, st ast.Stmt, parent ast.Node, scope string)
 	}
 	s := e.newSite(f, st, scope)
 	s.stmt = st
-	s.add(spec.SBRDelete, "", "if false {\n"+e.text(f, st)+"\n}")
+	s.add(spec.SBRDelete, "", "if "+falseExpr+" {\n"+e.text(f, st)+"\n}")
+}
+
+// edit replaces the bytes from start to end of a file's source with text.
+// An edit whose start is its end inserts text.
+type edit struct {
+	start, end int
+	text       string
 }
 
 // zero makes the mutant that returns the zero value of every result type
 // before a return statement whose results are not all zero already. The
 // mutant does not evaluate the results, and its form keeps the original
 // return after the new one, where it never runs.
-func (e *enumerator) zero(f *file, n *ast.ReturnStmt, fn *ast.FuncType, scope string) {
-	if fn == nil || fn.Results == nil || len(n.Results) == 0 {
+//
+// The form returns variables that no declaration at the site hides, as a
+// local variable named false, nil or after a type hides that name. It names
+// the function's results where they have no names, renames a result named
+// _, and copies each other named result before the function's first
+// statement, while the result is still the zero value. Its range starts at
+// the first of these edits, and its replacement states the zero values as
+// zeroOf writes them.
+func (e *enumerator) zero(f *file, n *ast.ReturnStmt, fn *function, scope string) {
+	if fn == nil || fn.typ.Results == nil || len(n.Results) == 0 {
 		return
 	}
-	var zeros []string
+	results := fn.typ.Results
+	var zeros, vars, copies, sources []string
 	var dests []types.Type
-	for _, field := range fn.Results.List {
+	var edits []edit
+	for _, field := range results.List {
 		zero, dest := e.zeroOf(f, field.Type), e.pkg.info.TypeOf(field.Type)
-		for range max(len(field.Names), 1) {
-			zeros, dests = append(zeros, zero), append(dests, dest)
+		if len(field.Names) == 0 {
+			v := zeroVar + strconv.Itoa(len(vars))
+			at := e.off(field.Type.Pos())
+			if results.Opening.IsValid() {
+				edits = append(edits, edit{at, at, v + " "})
+			} else {
+				end := e.off(field.Type.End())
+				edits = append(edits, edit{at, at, "(" + v + " "}, edit{end, end, ")"})
+			}
+			zeros, dests, vars = append(zeros, zero), append(dests, dest), append(vars, v)
+			continue
+		}
+		for _, name := range field.Names {
+			v := zeroVar + strconv.Itoa(len(vars))
+			if name.Name == "_" {
+				edits = append(edits, edit{e.off(name.Pos()), e.off(name.End()), v})
+			} else {
+				copies, sources = append(copies, v), append(sources, name.Name)
+			}
+			zeros, dests, vars = append(zeros, zero), append(dests, dest), append(vars, v)
 		}
 	}
 	if e.allZero(n.Results, dests) {
 		return
 	}
-	ret := "return " + strings.Join(zeros, ", ")
+	if len(copies) > 0 {
+		at := e.off(fn.body.Lbrace) + 1
+		edits = append(edits, edit{at, at, strings.Join(copies, ", ") + " := " + strings.Join(sources, ", ") + "; "})
+	}
 	s := e.newSite(f, n, scope)
-	s.add(spec.SBRZero, ret, "if true {\n"+ret+"\n}\n"+e.text(f, n))
+	var form strings.Builder
+	at := edits[0].start
+	for _, ed := range edits {
+		form.Write(f.src[at:ed.start])
+		form.WriteString(ed.text)
+		at = ed.end
+	}
+	form.Write(f.src[at:s.start])
+	form.WriteString("if " + trueExpr + " {\nreturn " + strings.Join(vars, ", ") + "\n}\n" + e.text(f, n))
+	m := s.add(spec.SBRZero, "return "+strings.Join(zeros, ", "), form.String())
+	m.from = edits[0].start
 }
 
 // callee returns the object that call calls, as the type checker resolves
@@ -1509,7 +1585,7 @@ func (e *enumerator) result(lines []string) *Result {
 			Start: start, End: end, Original: original, Replacement: replacement,
 			Rule: rule, Reason: reason, NotViable: notViable,
 		})
-		r.Forms[m.key] = Form{File: s.f.name, Start: s.start, End: s.end, Text: m.form}
+		r.Forms[m.key] = Form{File: s.f.name, Start: m.from, End: s.end, Text: m.form}
 		switch {
 		case !selected:
 			r.Static[m.key] = spec.NotSelected

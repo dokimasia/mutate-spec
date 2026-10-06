@@ -13,6 +13,7 @@ import (
 	"go/types"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -46,6 +47,16 @@ const (
 const (
 	compiler    = "gc"
 	fixturePath = "fixture"
+)
+
+// The run of a fixture's tests under a mutant's form: the go command that
+// runs them, the case of the corpus whose fixture they test, and the text
+// of go test's output for a failed test and for a build that fails.
+const (
+	goCommand    = "go"
+	shadowedCase = "shadowed"
+	testFailed   = "--- FAIL"
+	buildFailed  = "[build failed]"
 )
 
 // The mode of the files that the tests write, and of a file that a test
@@ -1779,6 +1790,29 @@ pairs sbr-delete 3: log.Print(i) -> "" [logging]
 			}
 		})
 
+		t.Run("writes forms whose tests fail exactly where the case shadowed states a kill", func(t *testing.T) {
+			t.Parallel()
+			s, err := spec.Load(repository)
+			assert.NoError(t, err, "the repository's definition and corpus load")
+			dir := s.Fixture(shadowedCase, goref.Language)
+			r, err := goref.Enumerate(dir, s.Catalogue, s.Overlays[goref.Language], goref.Options{})
+			assert.NoError(t, err, "Enumerate reads the fixture")
+			verdicts := map[string]string{}
+			for _, m := range s.Cases[shadowedCase].Mutants {
+				verdicts[m.ID()] = m.Verdict
+			}
+			env := ordinary(s.Protocol)
+			for _, m := range r.Expect.Mutants {
+				t.Run(m.ID(), func(t *testing.T) {
+					t.Parallel()
+					out := testForm(t, dir, r.Forms[m.Key], env)
+					assert.NotContains(t, out, buildFailed, "the ordinary build of the mutant compiles")
+					expect.Equal(t, strings.Contains(out, testFailed), verdicts[m.ID()] == spec.Killed,
+						"a test fails exactly where the case states killed: "+out)
+				})
+			}
+		})
+
 		t.Run("returns the same result on every call", func(t *testing.T) {
 			t.Parallel()
 			cat, ov := definition(t)
@@ -2161,4 +2195,40 @@ func compiles(dir string, form goref.Form) error {
 	conf := types.Config{Importer: importer.ForCompiler(fset, compiler, nil)}
 	_, err = conf.Check(fixturePath, fset, files, nil)
 	return err
+}
+
+// ordinary returns the environment of the test process without the
+// protocol's variables, so a fixture's tests run as in an ordinary build.
+func ordinary(p spec.Protocol) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if name != p.Variable && name != p.Instrumented {
+			env = append(env, kv)
+		}
+	}
+	return env
+}
+
+// testForm copies the fixture in dir with one mutant's form applied, runs
+// its tests with go test in the environment env, and returns the command's
+// output.
+func testForm(t *testing.T, dir string, form goref.Form, env []string) string {
+	t.Helper()
+	work := t.TempDir()
+	entries, err := os.ReadDir(dir)
+	assert.NoError(t, err, "the fixture lists")
+	for _, entry := range entries {
+		src, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		assert.NoError(t, err, entry.Name()+" reads")
+		if entry.Name() == form.File {
+			src = []byte(string(src[:form.Start]) + form.Text + string(src[form.End:]))
+		}
+		writeFile(t, filepath.Join(work, entry.Name()), string(src))
+	}
+	cmd := exec.CommandContext(t.Context(), goCommand, "test", "-count=1", ".")
+	cmd.Dir, cmd.Env = work, env
+	// A test that fails exits with status 1, which the output states.
+	out, _ := cmd.CombinedOutput()
+	return string(out)
 }

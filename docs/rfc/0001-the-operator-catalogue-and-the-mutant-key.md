@@ -107,7 +107,7 @@ one mutant at a site. The table uses Go's spelling:
 | Statement removal | `sbr-delete` | a statement | nothing |
 | | `sbr-zero` | `return e1, e2` | the zero value of each result type |
 
-Every kind obeys five invariants:
+Every kind obeys six invariants:
 
 - **A mutant is well typed.** Its replacement has the type of the original,
   as the language's type checker decides. A kind does not apply where the
@@ -115,7 +115,7 @@ Every kind obeys five invariants:
   overlay states the syntactic condition instead. A mutant that does not
   evaluate the only use of a name, in a language that rejects an unused
   name, keeps that use in its source behind a constant that skips it, such
-  as `if false { … }` in Go, so it compiles wherever the original does. The
+  as `if (0 != 0) { … }` in Go, so it compiles wherever the original does. The
   overlay states how each kind writes it, and each mutant that the compiler
   still rejects, such as a division by a constant 0.
 - **A mutant changes the program.** A kind does not apply where its
@@ -132,6 +132,13 @@ Every kind obeys five invariants:
 - **A site and a kind identify one mutant.** A kind makes at most one
   mutant at a site.
 - **A run activates one mutant at a time.**
+- **A mutant's source means what the mutant states.** No declaration of
+  the target changes what the source computes. A declaration can hide a
+  name at the site, such as a local variable named `false` in Go, or one
+  named after a type. The source writes each constant as an expression of
+  literals, such as `(0 != 0)`, and returns each zero value through a
+  variable that no declaration of the target names. The overlay states each
+  form.
 
 Each language's overlay maps every kind onto the language's syntax, such as
 `and` and `or` in Python, and settles three differences:
