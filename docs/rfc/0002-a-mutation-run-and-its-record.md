@@ -175,7 +175,7 @@ flowchart TD
    checked that the mutant runs left the tests' state intact.
 7. **Record.** The engine writes the record.
 
-The run upholds five invariants:
+The run upholds six invariants:
 
 - **One mutant, once, alone.** Each selected, viable, covered mutant has
   one run in the instrumented program, with no other mutant active. A run
@@ -199,6 +199,16 @@ The run upholds five invariants:
   one mutant of a target at a time unless the caller asks for more workers.
   Tests that share a resource outside their temporary directory, such as a
   fixed network port, give false kills when two copies run at once.
+- **Every run of a program has the settings of its opening control run.**
+  The settings that limit how many tests run at once, such as the
+  processor count and the runner's parallelism, are the same in the control
+  runs, the runs of one test alone, the mutant runs and the confirmation
+  runs. A run with more tests at once can pass a memory ceiling that the
+  opening control run set with fewer. A mutant whose effect shows only when
+  tests run at once, such as a race, would also get its verdict from its
+  place in key order. An engine may still start more mutant runs at once
+  during a run, up to the workers that the caller allows, because each
+  mutant run is a process of its own with the same settings.
 
 A key is the start of a SHA-256 digest, so the order of the keys is a
 pseudo-random permutation of the mutants that every run of the same code
