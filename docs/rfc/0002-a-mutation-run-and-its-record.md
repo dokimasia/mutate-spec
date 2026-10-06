@@ -170,7 +170,9 @@ flowchart TD
    closing control run passed or not. A file that a run added, changed or
    removed is the run error `changed-files`, whose message lists the files.
    The engine leaves the files as the runs left them, because a person can
-   edit the target while the run lasts.
+   edit the target while the run lasts. A run whose closing control run does
+   not complete, because the caller ended the run during it, fails: no run
+   checked that the mutant runs left the tests' state intact.
 7. **Record.** The engine writes the record.
 
 The run upholds five invariants:
@@ -203,8 +205,12 @@ pseudo-random permutation of the mutants that every run of the same code
 repeats. A run that the caller's deadline ends has then run a uniform
 sample of the target's mutants, whatever their files.
 
-The target's files are the files of its directory, and of its
-subdirectories that no other target contains, such as Go's `testdata`.
+The target's files are the files of its directory, hidden files included,
+and of its subdirectories that no other target contains. Every file below
+a subdirectory that the language's toolchain ignores, such as Go's
+`testdata`, is one of them. Outside such a subdirectory, a directory whose
+name starts with a dot, such as `.git`, is where a tool keeps its state,
+and its files are not the target's.
 
 ### The run's variables
 
@@ -322,10 +328,11 @@ This equals StrykerJS's mutation score on the verdicts that both define:
 - An uncovered mutant counts as undetected.
 - A compile error and an ignored mutant are excluded.
 
-A run fails when it has a run error, when any mutant is `error`, or when a
+A run fails when it has a run error, when any mutant is `error`, when a
 mutant is `not-run` for another reason than the caller's limit on the
-number of mutant runs. The score of a failed run is `null`. The score is
-also `null` when the denominator is 0.
+number of mutant runs, or when its opening control run passed and its
+closing control run did not complete. The score of a failed run is `null`.
+The score is also `null` when the denominator is 0.
 
 A run without a run error whose mutants did not all run, because the
 caller's deadline passed, the caller ended the run, or the run had started
@@ -437,7 +444,7 @@ are illustrative, not measured:
   "record": "dokimi-mutate",
   "version": 1,
   "catalogue": "1.0.0",
-  "overlay": "1.1.0",
+  "overlay": "1.2.0",
   "engine": { "name": "mutate-go", "version": "0.1.0" },
   "toolchain": "go1.27.1",
   "target": { "language": "go", "name": "github.com/google/btree" },
@@ -610,12 +617,13 @@ An engine passes a case when its record of the fixture contains:
 | Case | What its fixture does | What it proves |
 |---|---|---|
 | `arithmetic`, `relational-boundary`, `connector`, `unary`, `statements` | The kinds of one class each, with tests that kill every mutant but one | Each kind's sites and replacements, and the `killed` and `survived` rules |
+| `unary` | Also boolean operands in parentheses: the target of an assignment, and the operands of `&` and `!` | No `uoi-not` site at an operand in parentheses where the operand without them has none |
 | `short-circuit` | `p != nil && p.on`, tested with a nil `p` | Operand order and evaluation. `lcr-right` evaluates `p.on` on nil and crashes, which is `killed`. `lcr-left` never evaluates it, and survives |
 | `uncovered` | A function no test calls | `no-coverage`, and that no such mutant runs |
 | `hang` | A counting loop | `timed-out`, with the test that was running |
 | `runaway` | A loop that appends to a list until its counter equals a bound | `exhausted` where the record states a ceiling, `timed-out` where it does not, with the test that was running |
 | `annotations` | One annotated line, one annotation without a reason, one stale annotation | `suppressed`, and both run errors |
-| `rules` | Arithmetic inside the arguments of a logging call, and a capacity | `suppressed` with the rules `logging` and `capacity` |
+| `rules` | Arithmetic inside the arguments of a logging call, and a capacity, also in a call of a method expression | `suppressed` with the rules `logging` and `capacity`, with the argument of a method expression's call one place after the receiver |
 | `helper` | A test helper's mark through Go's `testing.TB` and through a library's own interface, and a method of that name with a parameter | `suppressed` with the rule `helper`, by an API and by the method rule |
 | `cancel` | Calls of the cancel functions of contexts with and without a deadline, deferred and not, and of a variable that holds both | `suppressed` with the rule `timing` by the result rule, only where every value of the variable is the cancel function of a deadline API |
 | `compound` | Logging calls in an if, a range and a switch statement, beside a return, in an if and a switch after a header that calls an API outside the families, and in a range over a channel | `suppressed` with the rule `logging` for every site of a statement that only logs, and for the condition and the case expressions after such a header, and every other mutant kept |
@@ -624,7 +632,8 @@ An engine passes a case when its record of the fixture contains:
 | `included` | A generated file with the include directive in its header, and one with the directive after the package clause | Mutants in the first file only |
 | `generated-included` | A generated file without the include directive, in a run that includes generated files | Mutants in the generated file, which `generated` lists as included |
 | `sample` | Five mutants that the tests kill, in a run that allows two mutant runs | The two least keys run and every later mutant is `not-run`, and the run does not fail |
-| `zero` | Returns of zero values of every form, and of an empty list | No `sbr-zero` site where every result is a zero value, and zero values written as code writes them |
+| `zero` | Returns of zero values of every form, of an empty list, and of a 0 and an empty string in an interface | No `sbr-zero` site where every result is the zero value of its result type, a site where an interface is not nil, and zero values written as code writes them |
+| `unwritten` | Returns of variables that declarations without values declare: two that no use writes, and one after each kind of write | No `sbr-zero` site at a return of a variable that no use writes, and a site after an assignment, a short variable declaration, an increment, a range clause, `&`, a slice expression, a method with a pointer receiver, a function literal, and a write after the return in a loop |
 | `terminating` | A final loop without a condition that a break ends, and a final switch without a default clause whose every clause returns | The deletion of each, because neither is terminating |
 | `unused` | Deletions, returns of zero values and connector mutants that leave out the only use of a variable, an import, a label or a type switch's symbol | Each runs, because its source writes that code behind a constant that skips it, and the tests kill it |
 | `confirm` | A test that skips while the instrumented program runs, another test that calls the same function without checking it, a function that only the skipped test calls, and a function that no test calls | Under confirmation, `killed` for the survivors and the mutants without coverage that the skipped test detects in their ordinary builds, `survived` for a survivor of both builds, `no-coverage` for the function that no test calls, `confirmed` on each of them, and no confirmation of a mutant that the instrumented program kills |

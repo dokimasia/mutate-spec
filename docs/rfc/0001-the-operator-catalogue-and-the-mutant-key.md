@@ -120,9 +120,11 @@ Every kind obeys five invariants:
   still rejects, such as a division by a constant 0.
 - **A mutant changes the program.** A kind does not apply where its
   replacement denotes the values of the original. `sbr-zero` has no site at
-  a return whose every result is already the zero value of its type, such
-  as `return Point{}, false` in Go. The overlay states which expressions
-  are zero values.
+  a return whose every result is already the zero value of its result type,
+  such as `return Point{}, false` in Go. The overlay states which
+  expressions are zero values. A result of an interface type is the zero
+  value only when it is nil, because a 0 or an empty string in an interface
+  is not nil.
 - **Operands evaluate as the mutated expression does.** No operand
   evaluates twice, operands evaluate in source order, and a connector keeps
   its short-circuit order. `lcr-right` does not evaluate `a` at all,
@@ -298,6 +300,11 @@ whose calls are in the family, method rules, result rules, and argument
 rules, which put one argument of a call into the family. A mutant is
 suppressed when its site is a call that a rule puts into a family, or is
 inside the arguments of one, or is an argument that a rule names.
+
+An argument rule states its argument as the index of the API's parameter.
+That index does not count a method's receiver. The call of a Go method
+expression passes the receiver as its first argument and the rule's
+argument one place later.
 
 | Family | APIs | Evidence |
 |---|---|---|
