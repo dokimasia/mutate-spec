@@ -1033,6 +1033,30 @@ viaOther sbr-delete 1: c.Helper() -> ""
 `, "a mark through an API or an interface's method is suppressed, and another method is not")
 		})
 
+		t.Run("suppresses the marks of parallel tests", func(t *testing.T) {
+			t.Parallel()
+			r := enumerate(t, fixture(t, map[string]string{"parallel.go": `package fixture
+
+import "testing"
+
+// pacer has a method Parallel of its own, which marks no test.
+type pacer interface {
+	Parallel()
+}
+
+func viaT(t *testing.T) {
+	t.Parallel()
+}
+
+func viaOther(p pacer) {
+	p.Parallel()
+}
+`}), goref.Options{})
+			assert.Equal(t, listing(r, spec.SBRDelete), `viaT sbr-delete 0: t.Parallel() -> "" [parallel]
+viaOther sbr-delete 0: p.Parallel() -> ""
+`, "the mark of a test through testing.T is suppressed, and the method of another type is not")
+		})
+
 		t.Run("suppresses the calls of a cancel function of a deadline", func(t *testing.T) {
 			t.Parallel()
 			r := enumerate(t, fixture(t, map[string]string{"cancel.go": `package fixture

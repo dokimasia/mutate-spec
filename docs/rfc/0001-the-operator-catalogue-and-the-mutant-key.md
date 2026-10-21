@@ -4,7 +4,7 @@ title: The operator catalogue and the mutant key
 author: Roy Klopper <roy.klopper@stealthscale.io>
 status: Draft
 created: 2026-10-02
-updated: 2026-10-06
+updated: 2026-10-20
 discussion: none
 supersedes: none
 superseded-by: none
@@ -301,7 +301,7 @@ annotation suppresses it.
 
 #### Rule families
 
-The catalogue names five families of code whose mutants developers do not
+The catalogue names six families of code whose mutants developers do not
 act on. The overlay states each family's rules in its language: the APIs
 whose calls are in the family, method rules, result rules, and argument
 rules, which put one argument of a call into the family. A mutant is
@@ -320,6 +320,7 @@ argument one place later.
 | `flags` | Calls that register a configuration flag | Google's third family |
 | `capacity` | Arguments that only size an allocation: a capacity or a size hint | Google names memory reservation as an arid node. A mutant of a capacity survives, because the collection grows anyway |
 | `helper` | Calls that mark a function as a test helper | The mark changes only the file and line that the test framework reports with a failure. A test sees that change only in the output of another test run, so the mutant survives every suite that does not read such output. Every assertion of an assertion library starts with such a call |
+| `parallel` | Calls that mark a test as parallel | The mark changes only when the test runs. The test waits until the function of its parent returns, and then runs at the same time as the other parallel tests of its parent. Only a test that observes this schedule detects the mutant. Two parallel tests that wait for each other observe it. A conformance suite that runs each of its laws as a parallel subtest makes one such mutant per law |
 
 Google reports that its first three families raised the share of mutants
 developers judged productive from about 15% to 80%. Its other rules took
@@ -667,11 +668,13 @@ excuses, in the same review.
   subsumed mutant's difference. A gap that only the subsumed mutant would
   show is then not reported.
 - **An overlay per language.** Each maps 13 kinds onto its syntax and lists
-  the APIs of five families. A new logging library in a language is a minor
+  the APIs of six families. A new logging library in a language is a minor
   version of that language's overlay.
 - **The helper family hides a test of the reported location.** A suite
   that checks the file and line a failure reports loses the mutants that
   would show a missing mark.
+- **The parallel family hides a test of the schedule.** A suite whose tests
+  wait for each other loses the mutants that would show a missing mark.
 - **A marked or included generated file counts as hand-written code.** One
   change to a generator can add survivors in every file that it writes.
 - **Including generated files changes what a score counts.** A run with
