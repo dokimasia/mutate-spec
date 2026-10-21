@@ -4,7 +4,7 @@ title: A mutation run and its record
 author: Roy Klopper <roy.klopper@stealthscale.io>
 status: Draft
 created: 2026-10-02
-updated: 2026-10-06
+updated: 2026-10-20
 discussion: none
 supersedes: none
 superseded-by: none
@@ -207,8 +207,9 @@ The run upholds six invariants:
   opening control run set with fewer. A mutant whose effect shows only when
   tests run at once, such as a race, would also get its verdict from its
   place in key order. An engine may still start more mutant runs at once
-  during a run, up to the workers that the caller allows, because each
-  mutant run is a process of its own with the same settings.
+  during a run, because each mutant run is a process of its own with the
+  same settings. It starts at most the workers that the caller allows, and
+  at most as many runs as fit in the memory budget with their ceilings.
 
 A key is the start of a SHA-256 digest, so the order of the keys is a
 pseudo-random permutation of the mutants that every run of the same code
@@ -288,9 +289,10 @@ opening control run, and they apply to each of its runs:
 | Limit | Value | Why |
 |---|---|---|
 | Deadline | 10 × the program's wall time in the opening control run + 2 s | One measurement of the program's suite gives no variance estimate, so the margin is wide. The 2 s cover process start and scheduling |
-| Memory ceiling | 4 × the program's peak resident memory in the opening control run + 512 MiB | A mutant that allocates without bound must end before it takes the machine |
+| Memory ceiling | 4 × the program's peak resident memory in the opening control run + 512 MiB, at most the memory budget, and at least the peak + 512 MiB | A mutant that allocates without bound must end before it takes the machine, and before the kernel's out-of-memory killer ends it |
 
-The limits are fixed, so two runs of the same target apply the same ones.
+The formulas are fixed, so two runs of the same target compute their
+limits by the same rules.
 A mutant's run of a program that starts with the tests of the mutant's site
 ends that first part at 10 × the sum of those tests' wall times in their
 runs alone + 2 s. A mutant that hangs in a fast test then does not wait for
@@ -299,6 +301,23 @@ program's deadline. Where a
 platform gives an engine no way to measure a process's resident memory, the
 engine does not apply a ceiling, and each program's `memoryCeilingBytes` in
 the record is `null`.
+
+The memory ceiling follows four rules:
+
+- A program's resident memory counts the program and every process that it
+  starts. A test that runs a case in a child process counts the child's
+  memory against the ceiling of its program. The peak of the opening
+  control run counts them together too.
+- The memory budget is the memory that the engine's runs may use at once.
+  The caller sets it, or the engine takes a share of the memory that its
+  process may use. A ceiling above the budget would let the kernel's
+  out-of-memory killer end a program before the engine does. Its mutant
+  would then get `error`, and a mutant in `error` fails the run.
+- A ceiling below the peak + 512 MiB would end the runs of mutants that use
+  only the memory of the tests, and the score would count them as
+  detected. A budget below that sum leaves the ceiling at the sum.
+- The engine starts only as many mutant runs of a target at once as fit in
+  the budget with their ceilings, and at least one.
 
 PIT's default deadline is 1.25 times a test's normal time plus 4 s, per
 test. StrykerJS's is 1.5 times the net time plus 5 s plus the measured
@@ -635,6 +654,7 @@ An engine passes a case when its record of the fixture contains:
 | `annotations` | One annotated line, one annotation without a reason, one stale annotation | `suppressed`, and both run errors |
 | `rules` | Arithmetic inside the arguments of a logging call, and a capacity, also in a call of a method expression | `suppressed` with the rules `logging` and `capacity`, with the argument of a method expression's call one place after the receiver |
 | `helper` | A test helper's mark through Go's `testing.TB` and through a library's own interface, and a method of that name with a parameter | `suppressed` with the rule `helper`, by an API and by the method rule |
+| `parallel` | A subtest that a function marks parallel through Go's `testing.T`, and a method `Parallel` of another type | `suppressed` with the rule `parallel` for the mark alone |
 | `cancel` | Calls of the cancel functions of contexts with and without a deadline, deferred and not, and of a variable that holds both | `suppressed` with the rule `timing` by the result rule, only where every value of the variable is the cancel function of a deadline API |
 | `compound` | Logging calls in an if, a range and a switch statement, beside a return, in an if and a switch after a header that calls an API outside the families, and in a range over a channel | `suppressed` with the rule `logging` for every site of a statement that only logs, and for the condition and the case expressions after such a header, and every other mutant kept |
 | `excluded` | A constant, a generated file and a file outside the build | No mutant in them, a `skipped` entry for the constant only, and the generated file in `generated` with its mutants |
@@ -783,6 +803,8 @@ static mutants.
   and 12.6% with no mutant active.
 - **The memory ceiling depends on the platform.** An engine applies it only
   where it can read a process's resident memory.
+- **The memory ceiling depends on the budget.** A machine with less memory
+  ends a growing mutant earlier, and runs fewer mutants at once.
 - **A timeout counts as detected.** A mutant that only slows the code past
   the deadline, such as one that removes a cache, counts as detected
   although no test checks it.
