@@ -254,6 +254,29 @@ func TestCommand(t *testing.T) {
 				HasSuffix("}\n", "and the file ends with a line break")
 		})
 
+		t.Run("writes an expectation with its history kept", func(t *testing.T) {
+			t.Parallel()
+			root := definitionCopy(t)
+			dir := writeCase(t, root, `{"case": "c", "history": {"engine": "same"}}`, map[string]string{
+				source: "package fixture\n\nfunc f(a int) bool {\n\treturn a < 1\n}\n",
+				spec.ExpectFile: `{"language": "go", "history": {"changed": [{"file": "f_test.go", "since": 2}]}, "mutants": [` +
+					`{"scope": "f", "kind": "ror-boundary", "nth": 0, "earlierTests": ["TestF"]}]}`,
+			})
+			_, err := run(cmdExpect, root)
+			assert.NoError(t, err, "expect writes the expectation")
+			_, e := readExpect(t, dir)
+			expect.Equal(t, e.History, &spec.ExpectHistory{Changed: []spec.Change{{File: "f_test.go", Since: 2}}},
+				"the changed files of the history are kept")
+			earlier := map[string][]string{}
+			for _, m := range e.Mutants {
+				if m.EarlierTests != nil {
+					earlier[m.ID()] = m.EarlierTests
+				}
+			}
+			expect.Equal(t, earlier, map[string][]string{"f ror-boundary 0": {testName}},
+				"and the earlier tests of the mutant that names them")
+		})
+
 		includes := []struct {
 			name    string
 			caseDoc string

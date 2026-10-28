@@ -15,8 +15,9 @@
 //
 // expect writes spec/corpus/<case>/go/expect.json of every case that has a
 // Go fixture, from goref's enumeration of the fixture's root package. It
-// keeps the file's lines, its suite, and the tests and the covering tests of
-// each mutant, which the enumeration does not decide.
+// keeps the file's lines, its suite, its history, and the tests, the
+// covering tests and the earlier tests of each mutant, which the
+// enumeration does not decide.
 //
 // manifest writes spec/manifest.json: the SHA-256 digest of every file that
 // an engine vendors, and a digest over the sorted list of those digests.
@@ -241,14 +242,14 @@ func expectations(root string) (map[string][]byte, error) {
 			return nil, fmt.Errorf("%s: %w", dir, err)
 		}
 		e := r.Expect
-		e.Suite = old.Suite
+		e.Suite, e.History = old.Suite, old.History
 		written := map[string]spec.ExpectMutant{}
 		for _, m := range old.Mutants {
 			written[m.ID()] = m
 		}
 		for i := range e.Mutants {
 			m := written[e.Mutants[i].ID()]
-			e.Mutants[i].Tests, e.Mutants[i].CoveredBy = m.Tests, m.CoveredBy
+			e.Mutants[i].Tests, e.Mutants[i].CoveredBy, e.Mutants[i].EarlierTests = m.Tests, m.CoveredBy, m.EarlierTests
 		}
 		files[path] = encode(&e, expectIndent)
 	}

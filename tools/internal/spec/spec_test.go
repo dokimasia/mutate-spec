@@ -32,6 +32,7 @@ const (
 	golang        = "go"
 	baseScope     = "f"
 	baseFile      = "f.go"
+	baseTestFile  = "f_test.go"
 	baseTest      = "TestF"
 	baseGenerated = "f_gen.go"
 )
@@ -278,6 +279,19 @@ func TestSpec(t *testing.T) {
 			})
 			editExpect(s, func(e *spec.Expect) { e.Mutants[0].Tests, e.Mutants[0].CoveredBy = nil, nil })
 			assert.Empty(t, s.Check(), "the confirmation of the mutant without coverage is the sample's run")
+		})
+
+		t.Run("returns no problem for a case with a history", func(t *testing.T) {
+			t.Parallel()
+			assert.Empty(t, withHistory(t).Check(), "Check finds no broken rule in the case with a history")
+		})
+
+		t.Run("returns no problem for a sample of a case with a history that runs beyond key order", func(t *testing.T) {
+			t.Parallel()
+			s := withHistory(t)
+			addSecondKill(s)
+			editCase(s, func(c *spec.Case) { c.Sample = 1 })
+			assert.Empty(t, s.Check(), "the engine orders the runs of a history by its groups")
 		})
 
 		t.Run("returns its problems in one order", func(t *testing.T) {
@@ -565,7 +579,7 @@ var brokenRules = []struct {
 	},
 	{
 		name: "for a schema whose record version differs from the protocol's",
-		edit: func(s *spec.Spec) { s.Protocol.Record.Version = 2 },
+		edit: func(s *spec.Spec) { s.Protocol.Record.Version = 3 },
 		want: "properties.version.const",
 	},
 	{
@@ -943,6 +957,122 @@ var brokenRules = []struct {
 		edit: func(s *spec.Spec) { s.Expects[baseCase][golang].Mutants[1].CoveredBy = []string{baseTest} },
 		want: "f ror-boundary 0 names covering tests, and its verdict suppressed has none",
 	},
+	{
+		name: "for an overlay without the rule of a test's file",
+		edit: func(s *spec.Spec) { editOverlay(s, func(o *spec.Overlay) { o.Tests = "" }) },
+		want: "overlay go: tests is empty",
+	},
+	{
+		name: "for an earlier verdict in a case without a history",
+		edit: func(s *spec.Spec) { s.Cases[baseCase].Mutants[0].Earlier = spec.Killed },
+		want: "f aor 0 states an earlier verdict, an observation or a reuse in a case without a history",
+	},
+	{
+		name: "for a history of an unknown engine",
+		edit: func(s *spec.Spec) { history(s, func(h *spec.History) { h.Engine = "newer" }) },
+		want: `history names the engine "newer", not same or other`,
+	},
+	{
+		name: "for an earlier verdict that the protocol lacks",
+		edit: func(s *spec.Spec) { history(s, func(*spec.History) { s.Cases[baseCase].Mutants[0].Earlier = "dead" }) },
+		want: `f aor 0 has the earlier verdict "dead", which the protocol does not define`,
+	},
+	{
+		name: "for an earlier verdict without an observation",
+		edit: func(s *spec.Spec) { history(s, func(*spec.History) { s.Cases[baseCase].Mutants[0].Observed = 0 }) },
+		want: "f aor 0 has an earlier verdict and no observation of at least 1",
+	},
+	{
+		name: "for an observation without an earlier verdict",
+		edit: func(s *spec.Spec) { history(s, func(*spec.History) { s.Cases[baseCase].Mutants[1].Observed = 1 }) },
+		want: "f ror-boundary 0 states an observation without an earlier verdict",
+	},
+	{
+		name: "for a reuse of another verdict than the earlier one",
+		edit: func(s *spec.Spec) {
+			history(s, func(*spec.History) { s.Cases[baseCase].Mutants[0].Earlier = spec.Survived })
+		},
+		want: `f aor 0 is reused, and its earlier verdict "survived" is not its verdict or no verdict of a mutant run`,
+	},
+	{
+		name: "for a reuse of a verdict without a mutant run",
+		edit: func(s *spec.Spec) {
+			history(s, func(*spec.History) {
+				m := &s.Cases[baseCase].Mutants[0]
+				m.Earlier, m.Verdict = spec.NoCoverage, spec.NoCoverage
+			})
+			editExpect(s, func(e *spec.Expect) {
+				e.Mutants[0].Tests, e.Mutants[0].CoveredBy, e.Mutants[0].EarlierTests = nil, nil, nil
+			})
+		},
+		want: `f aor 0 is reused, and its earlier verdict "no-coverage" is not its verdict or no verdict of a mutant run`,
+	},
+	{
+		name: "for a reuse of the history of another engine",
+		edit: func(s *spec.Spec) { history(s, func(h *spec.History) { h.Engine = spec.HistoryOther }) },
+		want: "f aor 0 is reused from the history of another engine",
+	},
+	{
+		name: "for an expectation of a history that the case lacks",
+		edit: func(s *spec.Spec) {
+			editExpect(s, func(e *spec.Expect) { e.History = &spec.ExpectHistory{Changed: []spec.Change{}} })
+		},
+		want: "expect.json states a history, and case.json does not",
+	},
+	{
+		name: "for a changed file of an age below 1",
+		edit: func(s *spec.Spec) {
+			history(s, func(*spec.History) {})
+			editExpect(s, func(e *spec.Expect) { e.History.Changed[0].Since = 0 })
+		},
+		want: `changed file "f_test.go" is empty, absolute, or has an age below 1`,
+	},
+	{
+		name: "for an absolute changed file",
+		edit: func(s *spec.Spec) {
+			history(s, func(*spec.History) {})
+			editExpect(s, func(e *spec.Expect) { e.History.Changed[0].File = "/" + baseFile })
+		},
+		want: `changed file "/f.go" is empty, absolute, or has an age below 1`,
+	},
+	{
+		name: "for a selection of a case with a history",
+		edit: func(s *spec.Spec) {
+			history(s, func(*spec.History) {})
+			editExpect(s, func(e *spec.Expect) { e.Lines = []string{baseFile + ":3-4"} })
+		},
+		want: "a case with a history selects lines",
+	},
+	{
+		name: "for earlier tests of a mutant whose earlier verdict names none",
+		edit: func(s *spec.Spec) { s.Expects[baseCase][golang].Mutants[1].EarlierTests = []string{baseTest} },
+		want: "f ror-boundary 0 names earlier tests, and its earlier verdict is no kill",
+	},
+}
+
+// withHistory returns base with a history of the same engine, in which the
+// aor mutant was killed by baseTest in the newest earlier run and its kill
+// is reused, and whose test file changed after that run.
+func withHistory(t *testing.T) *spec.Spec {
+	t.Helper()
+	s := base(t)
+	history(s, func(*spec.History) {})
+	return s
+}
+
+// history gives the case of base the history that withHistory states, and
+// then applies edit to it.
+func history(s *spec.Spec, edit func(*spec.History)) {
+	editCase(s, func(c *spec.Case) {
+		c.History = &spec.History{Engine: spec.HistorySame}
+		m := &c.Mutants[0]
+		m.Earlier, m.Observed, m.Reused = spec.Killed, 1, true
+		edit(c.History)
+	})
+	editExpect(s, func(e *spec.Expect) {
+		e.History = &spec.ExpectHistory{Changed: []spec.Change{{File: baseTestFile, Since: 1}}}
+		e.Mutants[0].EarlierTests = []string{baseTest}
+	})
 }
 
 // base returns the repository's definition with one case whose Go fixture

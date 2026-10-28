@@ -115,14 +115,17 @@ type Limits struct {
 // calls of a variable a result rule puts into its family, and Compound which
 // compound statements a family that lists calls suppresses as a whole.
 type Overlay struct {
-	Language  string              `json:"language"`
-	Version   string              `json:"version"`
-	Comment   string              `json:"comment"`
-	Generated string              `json:"generated"`
-	Files     []string            `json:"files"`
-	Scopes    []string            `json:"scopes"`
-	Tokens    string              `json:"tokens"`
-	Zero      string              `json:"zero"`
+	Language  string   `json:"language"`
+	Version   string   `json:"version"`
+	Comment   string   `json:"comment"`
+	Generated string   `json:"generated"`
+	Files     []string `json:"files"`
+	Scopes    []string `json:"scopes"`
+	Tokens    string   `json:"tokens"`
+	Zero      string   `json:"zero"`
+	// Tests states the file that declares a test, which the rule of a
+	// reused kill compares.
+	Tests     string              `json:"tests"`
 	Kinds     map[string][]string `json:"kinds"`
 	Skips     []SkipRule          `json:"skips"`
 	Families  Families            `json:"families"`
@@ -199,16 +202,34 @@ type Argument struct {
 // confirms its survivors and its mutants without coverage in each mutant's
 // ordinary build. IncludeGenerated is true for a case whose run includes
 // the generated files. Sample is the number of mutant runs that a case's
-// run allows, or 0 for every run.
+// run allows, or 0 for every run. History is nil for a case whose run reads
+// no history.
 type Case struct {
 	Case             string       `json:"case"`
 	Confirm          bool         `json:"confirm,omitempty"`
 	IncludeGenerated bool         `json:"includeGenerated,omitempty"`
 	Sample           int          `json:"sample,omitempty"`
+	History          *History     `json:"history,omitempty"`
 	Proves           string       `json:"proves"`
 	Fixture          string       `json:"fixture"`
 	Mutants          []CaseMutant `json:"mutants"`
 	Errors           []string     `json:"errors"`
+}
+
+// The engines of a case's history, as case.json spells them.
+const (
+	// HistorySame is the engine that runs the case.
+	HistorySame = "same"
+	// HistoryOther is another engine, whose verdicts no run reuses.
+	HistoryOther = "other"
+)
+
+// History is the history of a case's run. Each engine's corpus runner
+// writes it as a record from the case, because the record's requirements
+// digest states the engine and the toolchain that run the case. Engine is
+// HistorySame or HistoryOther.
+type History struct {
+	Engine string `json:"engine"`
 }
 
 // CaseMutant identifies a mutant in every language by its scope, its kind
@@ -218,6 +239,11 @@ type Case struct {
 // of its run, or a mutant whose site never executed. Languages restricts
 // the mutant to the fixtures of the languages it lists. Empty means every
 // language whose overlay defines the kind.
+//
+// In a case with a history, Earlier is the mutant's verdict in the history
+// and Observed the age of the run that observed it, 1 for the newest earlier
+// run. Both are empty for a mutant that the history lacks. Reused is true
+// for a mutant whose verdict the run reuses from the history.
 type CaseMutant struct {
 	Scope     string   `json:"scope"`
 	Kind      string   `json:"kind"`
@@ -225,6 +251,9 @@ type CaseMutant struct {
 	Verdict   string   `json:"verdict"`
 	Confirmed bool     `json:"confirmed,omitempty"`
 	Languages []string `json:"languages,omitempty"`
+	Earlier   string   `json:"earlier,omitempty"`
+	Observed  int      `json:"observed,omitempty"`
+	Reused    bool     `json:"reused,omitempty"`
 }
 
 // ID returns the mutant's identity within its case.
@@ -253,10 +282,25 @@ type Expect struct {
 	Language  string         `json:"language"`
 	Lines     []string       `json:"lines,omitempty"`
 	Suite     []string       `json:"suite,omitempty"`
+	History   *ExpectHistory `json:"history,omitempty"`
 	Mutants   []ExpectMutant `json:"mutants"`
 	Skipped   []Skip         `json:"skipped"`
 	Generated []Generated    `json:"generated"`
 	Errors    []string       `json:"errors"`
+}
+
+// ExpectHistory states what one language's fixture of a case with a
+// history changed since the history's runs.
+type ExpectHistory struct {
+	Changed []Change `json:"changed"`
+}
+
+// Change is a file of the fixture, relative to it, that differs in the
+// observation of the age Since and in each older one. The corpus runner
+// writes another digest of the file into those observations.
+type Change struct {
+	File  string `json:"file"`
+	Since int    `json:"since"`
 }
 
 // Generated is a generated file of the target without the include
@@ -271,24 +315,27 @@ type Generated struct {
 // ExpectMutant is one mutant as one language's record states it. Tests,
 // where it is not empty, lists the tests that the record names for the
 // mutant, in any order, and CoveredBy, where it is not empty, the tests that
-// the record's coveredBy names, in any order. The enumeration does not
-// decide either, so both are written by hand from the fixture's tests.
+// the record's coveredBy names, in any order. EarlierTests lists the tests
+// of an earlier kill, which the corpus runner writes into the history. The
+// enumeration decides none of the three, so each is written by hand from the
+// fixture's tests.
 type ExpectMutant struct {
-	Scope       string   `json:"scope"`
-	Kind        string   `json:"kind"`
-	Nth         int      `json:"nth"`
-	Occurrence  int      `json:"occurrence"`
-	Key         string   `json:"key"`
-	File        string   `json:"file"`
-	Start       Position `json:"start"`
-	End         Position `json:"end"`
-	Original    string   `json:"original"`
-	Replacement string   `json:"replacement"`
-	Rule        string   `json:"rule,omitempty"`
-	Reason      string   `json:"reason,omitempty"`
-	NotViable   bool     `json:"notViable,omitempty"`
-	Tests       []string `json:"tests,omitempty"`
-	CoveredBy   []string `json:"coveredBy,omitempty"`
+	Scope        string   `json:"scope"`
+	Kind         string   `json:"kind"`
+	Nth          int      `json:"nth"`
+	Occurrence   int      `json:"occurrence"`
+	Key          string   `json:"key"`
+	File         string   `json:"file"`
+	Start        Position `json:"start"`
+	End          Position `json:"end"`
+	Original     string   `json:"original"`
+	Replacement  string   `json:"replacement"`
+	Rule         string   `json:"rule,omitempty"`
+	Reason       string   `json:"reason,omitempty"`
+	NotViable    bool     `json:"notViable,omitempty"`
+	Tests        []string `json:"tests,omitempty"`
+	CoveredBy    []string `json:"coveredBy,omitempty"`
+	EarlierTests []string `json:"earlierTests,omitempty"`
 }
 
 // ID returns the mutant's identity within its case.
@@ -681,6 +728,9 @@ func (s *Spec) checkOverlays(p *problems) {
 		if len(o.Compound) == 0 {
 			p.add("overlay %s: compound states no rule", name)
 		}
+		if o.Tests == "" {
+			p.add("overlay %s: tests is empty", name)
+		}
 		for kind, rules := range o.Kinds {
 			if _, ok := kinds[kind]; !ok {
 				p.add("overlay %s: kind %q is not in the catalogue", name, kind)
@@ -826,7 +876,11 @@ func (s *Spec) checkCases(p *problems) {
 					p.add("case %s: %s is confirmed with the verdict %s, which no run of a build gives", name, m.ID(), m.Verdict)
 				}
 			}
+			checkEarlier(p, name, c, m, verdicts)
 			ids[m.ID()] = m
+		}
+		if h := c.History; h != nil && h.Engine != HistorySame && h.Engine != HistoryOther {
+			p.add("case %s: history names the engine %q, not %s or %s", name, h.Engine, HistorySame, HistoryOther)
 		}
 		for _, e := range c.Errors {
 			if !runErrors[e] {
@@ -842,6 +896,48 @@ func (s *Spec) checkCases(p *problems) {
 		for language, e := range s.Expects[name] {
 			s.checkExpect(p, name, language, c, ids, e, families)
 		}
+	}
+}
+
+// checkEarlier checks what the case c, named name, states of the history of
+// its mutant m: an earlier verdict, an observation and a reuse only in a
+// case with a history, an earlier verdict that the protocol defines with an
+// observation of at least 1, and a reuse only of an earlier verdict of a
+// mutant run that is the mutant's verdict, from the history of the engine
+// that runs the case.
+func checkEarlier(p *problems, name string, c Case, m CaseMutant, verdicts map[string]string) {
+	if c.History == nil {
+		if m.Earlier != "" || m.Observed != 0 || m.Reused {
+			p.add("case %s: %s states an earlier verdict, an observation or a reuse in a case without a history", name, m.ID())
+		}
+		return
+	}
+	if m.Earlier == "" {
+		if m.Observed != 0 {
+			p.add("case %s: %s states an observation without an earlier verdict", name, m.ID())
+		}
+	} else {
+		if _, ok := verdicts[m.Earlier]; !ok {
+			p.add("case %s: %s has the earlier verdict %q, which the protocol does not define", name, m.ID(), m.Earlier)
+		}
+		if m.Observed < 1 {
+			p.add("case %s: %s has an earlier verdict and no observation of at least 1", name, m.ID())
+		}
+	}
+	if !m.Reused {
+		return
+	}
+	switch m.Earlier {
+	case Killed, TimedOut, Exhausted, Survived:
+		if m.Earlier == m.Verdict {
+			break
+		}
+		fallthrough
+	default:
+		p.add("case %s: %s is reused, and its earlier verdict %q is not its verdict or no verdict of a mutant run", name, m.ID(), m.Earlier)
+	}
+	if c.History.Engine == HistoryOther {
+		p.add("case %s: %s is reused from the history of another engine", name, m.ID())
 	}
 }
 
@@ -884,6 +980,19 @@ func (s *Spec) checkExpect(p *problems, name, language string, c Case, ids map[s
 		}
 		generated[g.File] = true
 		leftOut[g.File] = !g.Included
+	}
+	if e.History != nil && c.History == nil {
+		p.add("%s: expect.json states a history, and case.json does not", where)
+	}
+	if e.History != nil {
+		for _, ch := range e.History.Changed {
+			if ch.File == "" || strings.HasPrefix(ch.File, "/") || ch.Since < 1 {
+				p.add("%s: changed file %q is empty, absolute, or has an age below 1", where, ch.File)
+			}
+		}
+	}
+	if c.History != nil && len(e.Lines) > 0 {
+		p.add("%s: a case with a history selects lines", where)
 	}
 	seen := map[string]bool{}
 	keys := map[string]string{}
@@ -946,13 +1055,22 @@ func (s *Spec) checkExpect(p *problems, name, language string, c Case, ids map[s
 				p.add("%s: %s names covering tests, and its verdict %s has none", where, m.ID(), want.Verdict)
 			}
 		}
+		switch want.Earlier {
+		case Killed, TimedOut, Exhausted:
+		default:
+			if len(m.EarlierTests) > 0 {
+				p.add("%s: %s names earlier tests, and its earlier verdict is no kill", where, m.ID())
+			}
+		}
 	}
 	for id, m := range ids {
 		if !seen[id] && m.In(language, o) {
 			p.add("%s: %s is in case.json and not in expect.json", where, id)
 		}
 	}
-	if c.Sample > 0 {
+	// A run with a history starts its mutants in the order of their groups,
+	// which the engine's corpus runner checks.
+	if c.Sample > 0 && c.History == nil {
 		checkSample(p, where, c, ids, e.Mutants)
 	}
 }
