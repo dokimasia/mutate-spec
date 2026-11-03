@@ -73,12 +73,18 @@ type Family struct {
 
 // Protocol is spec/protocol.json: the record's name and version, the
 // environment variable that every run of the suite sets, the variable that
-// every run of the instrumented program sets, the verdicts with their place
-// in the score, the run errors and the limits.
+// every run of the instrumented program sets, the variable that names the
+// trace, the prefix of every variable of a run, the values of the record's
+// killers and coverage, the verdicts with their place in the score, the run
+// errors and the limits.
 type Protocol struct {
 	Record       RecordName `json:"record"`
 	Variable     string     `json:"variable"`
 	Instrumented string     `json:"instrumented"`
+	Trace        string     `json:"trace"`
+	Prefix       string     `json:"prefix"`
+	Killers      []string   `json:"killers"`
+	Coverage     []string   `json:"coverage"`
 	Verdicts     []Verdict  `json:"verdicts"`
 	Errors       []string   `json:"errors"`
 	Limits       Limits     `json:"limits"`
@@ -203,18 +209,35 @@ type Argument struct {
 // ordinary build. IncludeGenerated is true for a case whose run includes
 // the generated files. Sample is the number of mutant runs that a case's
 // run allows, or 0 for every run. History is nil for a case whose run reads
-// no history.
+// no history. Killers is KillersAll for a case whose run names every test
+// that kills a mutant, and Coverage is CoverageLeaves for a case whose run
+// traces each leaf test alone. Each is empty for the protocol's default.
 type Case struct {
 	Case             string       `json:"case"`
 	Confirm          bool         `json:"confirm,omitempty"`
 	IncludeGenerated bool         `json:"includeGenerated,omitempty"`
 	Sample           int          `json:"sample,omitempty"`
 	History          *History     `json:"history,omitempty"`
+	Killers          string       `json:"killers,omitempty"`
+	Coverage         string       `json:"coverage,omitempty"`
 	Proves           string       `json:"proves"`
 	Fixture          string       `json:"fixture"`
 	Mutants          []CaseMutant `json:"mutants"`
 	Errors           []string     `json:"errors"`
 }
+
+// The values of a case's killers and coverage whose meaning the corpus's
+// rules read, as the protocol spells them.
+const (
+	// KillersFirst is a run that names the first test that kills a mutant.
+	KillersFirst = "first"
+	// KillersAll is a run that names every test that kills a mutant.
+	KillersAll = "all"
+	// CoverageTests is a run that traces each test of the runner alone.
+	CoverageTests = "tests"
+	// CoverageLeaves is a run that traces each leaf test alone.
+	CoverageLeaves = "leaves"
+)
 
 // The engines of a case's history, as case.json spells them.
 const (
@@ -244,16 +267,20 @@ type History struct {
 // and Observed the age of the run that observed it, 1 for the newest earlier
 // run. Both are empty for a mutant that the history lacks. Reused is true
 // for a mutant whose verdict the run reuses from the history.
+//
+// In a case whose run names every killer, AllKillers is true for a killed
+// mutant whose record states that its tests name every test that failed.
 type CaseMutant struct {
-	Scope     string   `json:"scope"`
-	Kind      string   `json:"kind"`
-	Nth       int      `json:"nth"`
-	Verdict   string   `json:"verdict"`
-	Confirmed bool     `json:"confirmed,omitempty"`
-	Languages []string `json:"languages,omitempty"`
-	Earlier   string   `json:"earlier,omitempty"`
-	Observed  int      `json:"observed,omitempty"`
-	Reused    bool     `json:"reused,omitempty"`
+	Scope      string   `json:"scope"`
+	Kind       string   `json:"kind"`
+	Nth        int      `json:"nth"`
+	Verdict    string   `json:"verdict"`
+	Confirmed  bool     `json:"confirmed,omitempty"`
+	AllKillers bool     `json:"allKillers,omitempty"`
+	Languages  []string `json:"languages,omitempty"`
+	Earlier    string   `json:"earlier,omitempty"`
+	Observed   int      `json:"observed,omitempty"`
+	Reused     bool     `json:"reused,omitempty"`
 }
 
 // ID returns the mutant's identity within its case.
@@ -643,9 +670,20 @@ func (s *Spec) checkProtocol(p *problems) {
 	if pr.Record.Name == "" || pr.Record.Version < 1 {
 		p.add("protocol: the record needs a name and a version of at least 1")
 	}
-	if pr.Variable == "" || pr.Instrumented == "" || pr.Variable == pr.Instrumented {
-		p.add("protocol: variable and instrumented must name two variables")
+	variables := []string{pr.Variable, pr.Instrumented, pr.Trace}
+	if slices.Contains(variables, "") || len(slices.Compact(slices.Sorted(slices.Values(variables)))) < len(variables) {
+		p.add("protocol: variable, instrumented and trace must name three variables")
 	}
+	if pr.Prefix == "" {
+		p.add("protocol: prefix is empty")
+	}
+	for _, v := range variables {
+		if !strings.HasPrefix(v, pr.Prefix) {
+			p.add("protocol: variable %q does not start with the prefix %q", v, pr.Prefix)
+		}
+	}
+	checkValues(p, "killers", pr.Killers)
+	checkValues(p, "coverage", pr.Coverage)
 	seen := map[string]bool{}
 	for _, v := range pr.Verdicts {
 		if seen[v.ID] {
@@ -668,6 +706,21 @@ func (s *Spec) checkProtocol(p *problems) {
 	l := pr.Limits
 	if l.Deadline.Factor <= 0 || l.Deadline.Seconds < 0 || l.Memory.Factor <= 0 || l.Memory.Bytes < 0 {
 		p.add("protocol: a limit's factor must be positive and its constant not negative")
+	}
+}
+
+// checkValues checks the values of the protocol's field name: at least one,
+// and none listed twice.
+func checkValues(p *problems, name string, values []string) {
+	if len(values) == 0 {
+		p.add("protocol: %s lists no value", name)
+	}
+	seen := map[string]bool{}
+	for _, v := range values {
+		if seen[v] {
+			p.add("protocol: %s lists %q twice", name, v)
+		}
+		seen[v] = true
 	}
 }
 
@@ -703,6 +756,8 @@ func (s *Spec) checkSchema(p *problems) {
 	want("verdict", enum("verdict"), verdicts)
 	want("family", enum("family"), families)
 	want("error", enum("error"), s.Protocol.Errors)
+	want("killers", enum("killers"), s.Protocol.Killers)
+	want("coverage", enum("coverage"), s.Protocol.Coverage)
 	props, _ := s.Schema["properties"].(map[string]any)
 	constant := func(name string) any {
 		prop, _ := props[name].(map[string]any)
@@ -876,8 +931,20 @@ func (s *Spec) checkCases(p *problems) {
 					p.add("case %s: %s is confirmed with the verdict %s, which no run of a build gives", name, m.ID(), m.Verdict)
 				}
 			}
+			if m.AllKillers && c.Killers != KillersAll {
+				p.add("case %s: %s states allKillers in a case whose run names the first killer", name, m.ID())
+			}
+			if m.AllKillers && m.Verdict != Killed {
+				p.add("case %s: %s states allKillers, and its verdict %s is no kill", name, m.ID(), m.Verdict)
+			}
 			checkEarlier(p, name, c, m, verdicts)
 			ids[m.ID()] = m
+		}
+		if c.Killers != "" && !slices.Contains(s.Protocol.Killers, c.Killers) {
+			p.add("case %s: killers is %q, which the protocol does not list", name, c.Killers)
+		}
+		if c.Coverage != "" && !slices.Contains(s.Protocol.Coverage, c.Coverage) {
+			p.add("case %s: coverage is %q, which the protocol does not list", name, c.Coverage)
 		}
 		if h := c.History; h != nil && h.Engine != HistorySame && h.Engine != HistoryOther {
 			p.add("case %s: history names the engine %q, not %s or %s", name, h.Engine, HistorySame, HistoryOther)

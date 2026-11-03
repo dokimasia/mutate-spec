@@ -281,6 +281,23 @@ func TestSpec(t *testing.T) {
 			assert.Empty(t, s.Check(), "the confirmation of the mutant without coverage is the sample's run")
 		})
 
+		t.Run("returns no problem for a case whose run names every killer", func(t *testing.T) {
+			t.Parallel()
+			s := base(t)
+			editCase(s, func(c *spec.Case) {
+				c.Killers = spec.KillersAll
+				c.Mutants[0].AllKillers = true
+			})
+			assert.Empty(t, s.Check(), "a kill of a run that names every killer states allKillers")
+		})
+
+		t.Run("returns no problem for a case whose run traces each leaf test alone", func(t *testing.T) {
+			t.Parallel()
+			s := base(t)
+			editCase(s, func(c *spec.Case) { c.Coverage = spec.CoverageLeaves })
+			assert.Empty(t, s.Check(), "the coverage of leaf tests is a value of the protocol")
+		})
+
 		t.Run("returns no problem for a case with a history", func(t *testing.T) {
 			t.Parallel()
 			assert.Empty(t, withHistory(t).Check(), "Check finds no broken rule in the case with a history")
@@ -525,12 +542,38 @@ var brokenRules = []struct {
 	{
 		name: "for an empty variable",
 		edit: func(s *spec.Spec) { s.Protocol.Variable = "" },
-		want: "protocol: variable and instrumented must name two variables",
+		want: "protocol: variable, instrumented and trace must name three variables",
 	},
 	{
 		name: "for one variable named twice",
 		edit: func(s *spec.Spec) { s.Protocol.Instrumented = s.Protocol.Variable },
-		want: "protocol: variable and instrumented must name two variables",
+		want: "protocol: variable, instrumented and trace must name three variables",
+	},
+	{
+		name: "for an empty variable of the trace",
+		edit: func(s *spec.Spec) { s.Protocol.Trace = "" },
+		want: "protocol: variable, instrumented and trace must name three variables",
+	},
+	{
+		name: "for a variable of the trace named as the variable",
+		edit: func(s *spec.Spec) { s.Protocol.Trace = s.Protocol.Variable },
+		want: "protocol: variable, instrumented and trace must name three variables",
+	},
+	{
+		name: "for a variable without the prefix",
+		edit: func(s *spec.Spec) { s.Protocol.Instrumented = "MUTATE_INSTRUMENTED" },
+		want: `protocol: variable "MUTATE_INSTRUMENTED" does not start with the prefix "DOKIMI_MUTATE_"`,
+	},
+	{name: "for an empty prefix", edit: func(s *spec.Spec) { s.Protocol.Prefix = "" }, want: "protocol: prefix is empty"},
+	{
+		name: "for killers without a value",
+		edit: func(s *spec.Spec) { s.Protocol.Killers = nil },
+		want: "protocol: killers lists no value",
+	},
+	{
+		name: "for a value of coverage listed twice",
+		edit: func(s *spec.Spec) { s.Protocol.Coverage = append(s.Protocol.Coverage, s.Protocol.Coverage[0]) },
+		want: `protocol: coverage lists "tests" twice`,
 	},
 	{name: "for a record version of 0", edit: func(s *spec.Spec) { s.Protocol.Record.Version = 0 }, want: "a version of at least 1"},
 	{
@@ -571,6 +614,16 @@ var brokenRules = []struct {
 		name: "for a schema whose run errors differ from the protocol's",
 		edit: func(s *spec.Spec) { s.Protocol.Errors = s.Protocol.Errors[1:] },
 		want: "$defs.error enumerates",
+	},
+	{
+		name: "for a schema whose killers differ from the protocol's",
+		edit: func(s *spec.Spec) { s.Protocol.Killers[1] = "every" },
+		want: "$defs.killers enumerates",
+	},
+	{
+		name: "for a schema whose coverage differs from the protocol's",
+		edit: func(s *spec.Spec) { s.Protocol.Coverage[1] = "subtests" },
+		want: "$defs.coverage enumerates",
 	},
 	{
 		name: "for a schema whose record name differs from the protocol's",
@@ -771,6 +824,31 @@ var brokenRules = []struct {
 			})
 		},
 		want: "f ror-boundary 0 is confirmed with the verdict suppressed",
+	},
+	{
+		name: "for killers that the protocol does not list",
+		edit: func(s *spec.Spec) { editCase(s, func(c *spec.Case) { c.Killers = "most" }) },
+		want: `case c: killers is "most", which the protocol does not list`,
+	},
+	{
+		name: "for a coverage that the protocol does not list",
+		edit: func(s *spec.Spec) { editCase(s, func(c *spec.Case) { c.Coverage = "lines" }) },
+		want: `case c: coverage is "lines", which the protocol does not list`,
+	},
+	{
+		name: "for allKillers in a case that names the first killer",
+		edit: func(s *spec.Spec) { s.Cases[baseCase].Mutants[0].AllKillers = true },
+		want: "f aor 0 states allKillers in a case whose run names the first killer",
+	},
+	{
+		name: "for allKillers on a mutant that is no kill",
+		edit: func(s *spec.Spec) {
+			editCase(s, func(c *spec.Case) {
+				c.Killers = spec.KillersAll
+				c.Mutants[1].AllKillers = true
+			})
+		},
+		want: "f ror-boundary 0 states allKillers, and its verdict suppressed is no kill",
 	},
 	{name: "for a negative sample", edit: func(s *spec.Spec) { editCase(s, func(c *spec.Case) { c.Sample = -1 }) }, want: "sample -1 is negative"},
 	{
