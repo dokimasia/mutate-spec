@@ -1826,11 +1826,14 @@ pairs sbr-delete 3: log.Print(i) -> "" [logging]
 				})
 				assert.NoError(t, err, "Enumerate reads the fixture of "+name)
 				got := r.Expect
-				got.Suite = want.Suite
+				got.Suite, got.History = want.Suite, want.History
 				if len(got.Mutants) == len(want.Mutants) {
-					// The tests and the covering tests are written by hand.
+					// The tests, the covering tests and the earlier tests are
+					// written by hand.
 					for i := range got.Mutants {
-						got.Mutants[i].Tests, got.Mutants[i].CoveredBy = want.Mutants[i].Tests, want.Mutants[i].CoveredBy
+						m := want.Mutants[i]
+						got.Mutants[i].Tests, got.Mutants[i].CoveredBy, got.Mutants[i].EarlierTests =
+							m.Tests, m.CoveredBy, m.EarlierTests
 					}
 				}
 				expect.Equal(t, got, want, "the enumeration of "+name+" is its expect.json", assert.EquateEmpty())
