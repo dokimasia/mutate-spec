@@ -10,3 +10,5 @@ because they record why not.
 | [0002](0002-a-mutation-run-and-its-record.md) | A mutation run and its record | Draft |
 | [0003](0003-reports-from-a-runs-records.md) | Reports from a run's records | Draft |
 | [0004](0004-verdicts-reused-from-earlier-runs.md) | Verdicts reused from earlier runs | Accepted |
+| [0005](0005-the-tests-that-kill-and-cover-a-mutant.md) | The tests that kill and cover a mutant | Accepted |
+| [0006](0006-the-variables-of-a-run-in-a-child-process.md) | The variables of a run in a child process | Accepted |
